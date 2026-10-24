@@ -182,6 +182,7 @@ python tests/run_all.py realm      # 只跑名字里含 realm 的
 - 211 个套件：158 个 Python + 53 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - 211 个套件：157 个 Python + 54 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - 225 个套件：166 个 Python + 59 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 227 个套件：168 个 Python + 59 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - 211 个套件：158 个 Python + 53 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - 211 个套件：157 个 Python + 54 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - 211 个套件：158 个 Python + 53 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
@@ -419,6 +420,20 @@ python wb_agents.py restore --client codex                 # 随时字节级还�
 
 手动粘贴接受两种写法（都不用自己换算）：64 位 hex 的保护密钥，或 44 字符 base64 的 `atRestSecretKey`。拿不到密钥时，macOS / Linux 上请直接用方式一走浏览器登录。提示权限不足时，以管理员身份启动网关再试一次。
 
+### 方式三：把账号池里的账号切到桌面客户端（本机，会重启客户端）
+
+账号行操作区新增「切换」：点一下 → 确认 → 网关依次 **停客户端 → 备份当前登录态 → 写入目标账号会话 → 重启客户端**。不需要重新扫码，也不需要手动改文件。
+
+- 只支持**同区**切换：目标账号的 realm 必须与客户端当前登录态文件一致（国际版 `workbuddy-desktop-ai.info` / 国内版 `workbuddy-desktop.info`），跨区会直接报错；
+- 备份落在 `accounts/agent-backups/client-auth/<时间戳>/`，含原 `.info`、登出标记（如果有）与 `manifest.json`（sha256）；
+- 写入前用上游 `/v2/accounts` 补齐 `uid / nickname / uin` 等档案字段，token/nickname 用客户端同一套 `$wbEncrypted`（AES-256-GCM）重新封装；写后回读校验，客户端起不来或 uid 对不上会**回滚备份并重新拉起原账号**；
+- 默认只允许**本机回环**调用（会停/启本机客户端，不适合经 LAN 面板远程触发）；静态 API Key 账号没有桌面登录身份，不会显示该按钮；
+- **本地会话列表同步（面板按钮，不跟切号自动做）**：国际版账号列表上方新增「同步会话」按钮，把 `workbuddy.db` 里所有「有 JSONL 消息文件的本地会话」的 `user_id` 指到当前客户端登录账号，侧边栏就能看到并打开其它账号的本地会话（真机实测可打开）。原归属写入新增列 `wb_original_user_id`，可用 `python wb_client_switch.py sessions-restore` 还原；每次同步前备份 `workbuddy.db`（含 wal/shm）到 `accounts/agent-backups/client-db/`。**云端会话（`transport='cloud'`）不合并**——消息在服务端、按原账号鉴权，改了 `user_id` 只会看到一个打不开的条目；需要云端跨号可见只能做反向代理/重放，风险和成本都高，本功能不做。
+- **备份只留三份**：`client-auth` 与 `client-db` 两类备份各自最多保留最新 3 份；内容与最新一份完全相同的不再新建目录。
+- 停/启客户端用的 `tasklist` / `taskkill` 全部带 `CREATE_NO_WINDOW`，不会再给每次切号弹十几个命令行窗口。
+- 需要单独查看/还原时：`python wb_client_switch.py sessions-count <uid>`（只统计）、`sessions-sync <uid>`（手动合并）、`sessions-restore`（按 `wb_original_user_id` 还原原归属）、`prune-backups`（手动把两类备份收缩到 3 份）。
+- 同一个账号的 `refreshToken` 不要同时让网关和客户端刷新（可能互相失效）。长期使用建议「客户端用一份独立登录态，网关用账号池里的另一份」，或者切完后先不要让网关保活该号。
+
 ---
 
 ## 四、客户端配置与接入
@@ -494,6 +509,11 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 <!-- 发版时：把下面的 Unreleased 段落整理成新版本号（## vX.Y.Z），整体移入 docs/CHANGELOG.md 顶部 -->
 
 - **v1.7.33 已于 2026-10-23 发布**：本版集成 #630、#632、#635、#638，并自本版起进入低频维护。完整变更与验证记录见 **[docs/CHANGELOG.md](docs/CHANGELOG.md#v173)**；下一版的改动继续写在本段。
+
+### Unreleased
+
+- **看板一键把账号池里的账号切到桌面客户端**：账号行新增「切换」按钮，点击后网关停掉本机 WorkBuddy 客户端、备份当前登录态（`accounts/agent-backups/client-auth/<时间戳>/`，含 sha256）、用目标账号的 token 重新构造 `auth/*.info`（`/v2/accounts` 补 `uid/nickname/uin`，`wb_atrest.seal()` 按客户端同一套 `$wbEncrypted` 封装）、再重启客户端；不需要重新扫码。写后回读校验，启动失败或 uid 对不上自动回滚备份并拉回原账号。只允许同区切换、只接受本机回环请求；静态 API Key 账号不显示按钮。国际版账号列表上方另有独立的「同步会话」按钮（切号不自动合并），只合并有 JSONL 的 `transport='local'` 会话，原归属写入 `wb_original_user_id` 可还原；`tasklist`/`taskkill` 全部改成无窗口启动，auth/db 备份各保留最新 3 份。新增 `wb_client_switch.py` 与 `tests/_test_client_switch.py`（24 个用例），完整套件 227 项。 / One-click "switch the desktop client to this pooled account" from the panel: the gateway stops the local WorkBuddy client, backs up the current login (`accounts/agent-backups/client-auth/<timestamp>/` with sha256), rebuilds `auth/*.info` from the target account (`/v2/accounts` fills `uid/nickname/uin`; tokens and nickname are re-sealed with the client's own `$wbEncrypted` scheme via `wb_atrest.seal()`), then restarts the client — no new QR login. The written session is read back and verified; a failed start or uid mismatch restores the backup and relaunches the original account. A separate "Sync sessions" button above the Global account list merges local sessions with JSONL files into the current client account (switching no longer does this automatically; original owners are restorable); `tasklist`/`taskkill` now run windowless and both auth/db backups keep only the newest three. Same-realm only, loopback-only, and hidden for static API-key accounts. Added `wb_client_switch.py` and `tests/_test_client_switch.py` (24 cases), 227 suites in total.
+- **官方客户端抓包工具链与风控校验文档**：新增 `tools/capture/`——mitmproxy 插件 `wb_capture_addon.py`（落盘前脱敏，只留请求形状）、`analyze_capture.py`（摘要 / 两次抓包 diff / 与 `wb_identity` 常量核对）、`wb_reverse_pin.py`（hosts 反代把上游钉到真实 IP），配 `tests/_test_capture_tools.py`（不装 mitmproxy 也能跑）；文档新增《抓包指南》《客户端接口面-5.8.4》《风控校验-5.8.4》《改进建议》《任务交接-抓包与风控校验》。核心结论：桌面端对话走 agentos WebSocket，不经 `/v2/chat/completions`；mitmproxy `local` 模式是唯一能完整抓到官方客户端流量的路线。 / Capture toolchain and risk-control notes for the official desktop client: `tools/capture/` ships the mitmproxy add-on `wb_capture_addon.py` (credentials are redacted before anything is written and only request shapes are kept), `analyze_capture.py` (summaries, capture-to-capture diff, constant checks against `wb_identity`) and `wb_reverse_pin.py` (pins the upstream to its real IP in hosts reverse-proxy mode), with `tests/_test_capture_tools.py` (runs without mitmproxy installed). New docs: the capture guide, the 5.8.4 client API surface, the 5.8.4 risk-control review, improvement proposals and handover notes. Key findings: desktop chats ride the agentos WebSocket and never touch `/v2/chat/completions`, and only mitmproxy's `local` mode captures the official client's traffic end to end.
 
 - **修正 CN 专属模型判定，并给 OpenCode 写入真实上下文上限**（#618 / #625）：`minimax-` 曾被当成整个模型家族的 CN 专属前缀，于是国际版也提供的 `minimax-m3.1-flash` 被本地 400 拦下。现在只保留确定的 CN 独占项（`deepseek-v4-pro*` 与显式 `minimax-m3`），同族其他模型按出口实际目录判断。OpenCode 一键配置此前只写空的模型条目，客户端只能回落到自己的 200k 默认值；现在把网关目录中的 `context_window` / `max_output` 写进 `limit.context` / `limit.output`，没有规格的条目仍保持空对象。新增回归覆盖。 / Narrow the China-only model gate and give OpenCode the real context limit (#618 / #625): `minimax-` used to mark the whole family as CN-exclusive, so the globally served `minimax-m3.1-flash` was refused locally with a 400. Only the confirmed China-only entries remain (`deepseek-v4-pro*` and the explicit `minimax-m3`); other members of the family follow the actual catalogue of the selected exit. OpenCode's one-click config used to write empty model entries, so it fell back to its own 200k default; the gateway's catalogue `context_window` / `max_output` now go into `limit.context` / `limit.output`, while entries without specs stay empty objects. Regression coverage added.
 - **流式回复在真实静默期发送 SSE 心跳**（#578）：上游思考期间可能长时间一个字节都不发，而客户端会把静默误判为断流；只在每次阻塞读之前检查心跳，恰好无法覆盖它。Chat、Responses 与 Anthropic Messages 三条流式路径现在共用后台 `SSEHeartbeat`：每 15 秒无写入就发送合法的 `: keepalive` 注释帧，与业务帧共用锁，保证不会截断 JSON；响应正常时不会多插帧，流结束后线程立即停止。新增 `tests/_test_stream_keepalive.py`（9 项，含读线程阻塞期间仍收到心跳与并发写入完整性），并复跑流式 id、usage 帧、断流错误帧与重试套件。 / Keep SSE streams alive through real upstream silence (#578): while the model is thinking the upstream may send nothing for longer than the client's idle window, and checking a heartbeat only before the next blocking read cannot cover that gap. Chat, Responses and Anthropic Messages now share a background `SSEHeartbeat`: after 15 idle seconds it writes a valid `: keepalive` comment frame under the same lock as application writes, so JSON frames cannot be split; responsive streams gain no extra frames and the thread stops as soon as the stream ends. Added `tests/_test_stream_keepalive.py` (9 checks, including heartbeat delivery while the reader is blocked and write integrity under contention), and re-ran the stream id, usage-frame, abort-frame and retry suites.

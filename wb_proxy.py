@@ -68,6 +68,7 @@ import wb_accounts
 import wb_activity
 import wb_atrest
 import wb_catalog
+import wb_client_switch
 import wb_egress
 import wb_ipintel
 import wb_logstore
@@ -469,6 +470,20 @@ def peer_is_trusted(peer_ip):
         if addr.version == net.version and addr in net:
             return True
     return False
+
+
+def peer_is_loopback(peer_ip):
+    """严格回环判定：不接受 WB_TRUSTED_PROXIES 里的反代来源。
+
+    切号会停/启本机 WorkBuddy 客户端，属于「只该由坐在本机的人触发」的动作；
+    反代后面的 LAN 客户端即使有面板密码也不该远程触发它。
+    """
+    try:
+        addr = ipaddress.ip_address(str(peer_ip))
+    except ValueError:
+        return False
+    mapped = addr.ipv4_mapped if addr.version == 6 else None
+    return bool(addr.is_loopback or (mapped is not None and mapped.is_loopback))
 _PROXY_HEADER_IP_MAX = 64  # 最长的 IPv6 文本也到不了 46 字符，再长就是垃圾
 def _proxy_header_ip(value):
     """从代理头里取一个合法 IP 的规范文本；取不到返回 None（绝不抛异常）。
@@ -20605,6 +20620,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_accounts_login_cancel(payload)
         if path == "/accounts/import/desktop":
             return self._route_accounts_import_desktop(payload)
+        if path == "/accounts/switch-client":
+            return self._route_accounts_switch_client(payload)
+        if path == "/accounts/sync-sessions":
+            return self._route_accounts_sync_sessions(payload)
         if path == "/accounts/refresh":
             return self._route_accounts_refresh(payload)
         if path == "/accounts/sync-profile":
@@ -21184,6 +21203,77 @@ class Handler(BaseHTTPRequestHandler):
             "pool_uids": [a.uid for a in POOL.accounts],
             "atrest": wb_atrest.status(),
         })
+
+    def _route_accounts_switch_client(self, payload):
+        """把账号池里的一个号切换成桌面客户端当前登录的账号。
+
+        只做本机操作：停客户端 -> 备份当前 auth/*.info -> 写入目标会话 ->
+        重启客户端。默认只接受回环来源；写前备份、失败回滚，细节在
+        wb_client_switch 模块里。
+        """
+        if not peer_is_loopback(self.client_address[0]):
+            return self._json_panel(200, {
+                "ok": False,
+                "error": "切号只允许从本机面板操作（会停/启本机 WorkBuddy 客户端）",
+            })
+        uid = str(payload.get("uid") or "").strip()
+        if not uid:
+            return self._json_panel(200, {"ok": False, "error": "缺少 uid"})
+        account = POOL.get(uid)
+        if account is None:
+            return self._json_panel(200, {"ok": False, "error": "账号不存在"})
+        try:
+            result = wb_client_switch.switch_account(
+                account, accounts_dir=ACCOUNTS_DIR,
+                dry_run=bool(payload.get("dryRun")),
+                log=lambda msg: log(msg, tag="accounts"))
+        except wb_client_switch.ClientSwitchError as exc:
+            log("switch client failed for %s: %s" % (uid[:8], exc),
+                level="WARN", tag="accounts")
+            return self._json_panel(200, {"ok": False, "error": str(exc)})
+        except Exception as exc:
+            log("switch client failed for %s: %s" % (uid[:8], exc),
+                level="WARN", tag="accounts")
+            return self._json_panel(200, {"ok": False, "error": "切换失败：%s" % exc})
+        if not result.get("dryRun"):
+            log("desktop client switched to %s (backup=%s)"
+                % (uid[:8], result.get("backup")), tag="accounts")
+        return self._json_panel(200, result)
+
+    def _route_accounts_sync_sessions(self, payload):
+        """把本机本地会话列表合并到当前桌面客户端登录账号。
+
+        面板「同步会话」按钮走这里；客户端在跑时会先停、合并、再拉起，让
+        侧边栏立刻刷新。只处理本地会话（有 JSONL），云端会话按账号隔离。
+        """
+        if not peer_is_loopback(self.client_address[0]):
+            return self._json_panel(200, {
+                "ok": False,
+                "error": "同步会话只允许从本机面板操作（会停/启本机 WorkBuddy 客户端）",
+            })
+        try:
+            client = wb_client_switch.current_client()
+            if client.get("realm") and client["realm"] != "intl":
+                return self._json_panel(200, {
+                    "ok": False,
+                    "error": "当前桌面客户端登录的不是国际版账号；同步会话按钮只对国际版开放",
+                })
+            uid = str(payload.get("uid") or "").strip() or None
+            result = wb_client_switch.sync_client_sessions(
+                ACCOUNTS_DIR, uid=uid,
+                log=lambda msg: log(msg, tag="accounts"))
+        except wb_client_switch.ClientSwitchError as exc:
+            log("sync sessions failed: %s" % exc, level="WARN", tag="accounts")
+            return self._json_panel(200, {"ok": False, "error": str(exc)})
+        except Exception as exc:
+            log("sync sessions failed: %s" % exc, level="WARN", tag="accounts")
+            return self._json_panel(200, {"ok": False, "error": "同步会话失败：%s" % exc})
+        target = POOL.get(str(result.get("uid") or ""))
+        result["nickname"] = target.nickname if target is not None else ""
+        log("local sessions synced to %s: moved=%s cloud_skipped=%s"
+            % (str(result.get("uid") or "")[:8], result.get("moved"),
+               result.get("cloudSkipped")), tag="accounts")
+        return self._json_panel(200, result)
 
     def _route_accounts_refresh(self, payload):
         uid = payload.get("uid")
