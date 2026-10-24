@@ -1303,6 +1303,10 @@ class Account(object):
         # The dashboard snapshots this state while request threads update it.
         # Keep it separate from _refresh_lock, which spans network requests.
         self._throttle_lock = threading.Lock()
+        # 每小时 token 节律（wb_settings.hourly_token_limit，默认 0=关）：
+        # {小时桶: 累计 tokens}，跨桶自动清零，见 note_hourly_usage。
+        self.hourly_token_limit = 0
+        self._hourly_buckets = {}
         # 桌面身份的云端会话生命周期（2026-10-24 实测对齐，见
         # cloud_conversation）：(session_key -> {id, created_ms, title_set,
         # retry_after})。create 是网络调用，锁跨网络持有——每账号每会话只
@@ -1691,6 +1695,43 @@ class Account(object):
         except (TypeError, ValueError):
             return False
 
+    def note_hourly_usage(self, tokens):
+        """把这一轮的 tokens 记进当前小时桶（节律限速用）。
+
+        固定钟点桶：本地整点切换即清零，没有滚动窗口的边界模糊。旧桶在
+        下一次记账时顺手丢弃。
+        """
+        try:
+            amount = int(tokens)
+        except (TypeError, ValueError):
+            return
+        if amount <= 0:
+            return
+        bucket = int(time.time() // 3600)
+        with self._throttle_lock:
+            self._hourly_buckets[bucket] = (
+                self._hourly_buckets.get(bucket, 0) + amount)
+            for stale in [k for k in self._hourly_buckets if k != bucket]:
+                del self._hourly_buckets[stale]
+
+    def hourly_tokens_this_hour(self):
+        bucket = int(time.time() // 3600)
+        with self._throttle_lock:
+            return int(self._hourly_buckets.get(bucket, 0))
+
+    def hourly_limit_blocked(self):
+        """True when this clock-hour's usage reached the configured limit.
+
+        默认 0 = 不设限（节律限速是可选项，老安装行为不变）。
+        """
+        try:
+            limit = int(self.hourly_token_limit or 0)
+        except (TypeError, ValueError):
+            return False
+        if limit <= 0:
+            return False
+        return self.hourly_tokens_this_hour() >= limit
+
     def model_is_free(self, model):
         """True when the realm catalogue marks `model` as a free one."""
         return bool(model) and model in (self.free_models or ())
@@ -1932,6 +1973,9 @@ class Account(object):
         # Today's token budget is spent: keep the seat for tomorrow instead
         # of letting the upstream answer 429 for the rest of the day.
         if self.daily_limit_blocked():
+            return False
+        # 这个小时的节律额度用满：本小时不出单，下个整点自动恢复。
+        if self.hourly_limit_blocked():
             return False
         # The day's credit spend reached the cap: paid models stop, free
         # ones keep serving (see credit_limit_blocked).
@@ -4805,22 +4849,25 @@ class AccountPool(object):
             self._remaining_weights = table
         return table
 
-    def apply_daily_token_limit(self, values=None, usage=None):
+    def apply_daily_token_limit(self, values=None, usage=None, hourly=None):
         """Re-resolve the daily token guard for every account.
 
         Same shape as apply_reserve_credits(): settings.json holds the limit
         per realm, while `usage` (uid -> tokens counted today) comes from the
         caller, because only the proxy reads the usage log. Passing None keeps
         the last known counts, so a settings change never turns them into
-        "unknown".
+        "unknown". `hourly` 同理解析每小时节律限速（默认 0=关）。
         """
         import wb_settings
 
         if values is None:
             values = wb_settings.limit_values(self.dir, "daily_token_limit")
+        if hourly is None:
+            hourly = wb_settings.limit_values(self.dir, "hourly_token_limit")
         with self._lock:
             for account in self.accounts:
                 limit = _realm_limit(values, account.realm)
+                account.hourly_token_limit = _realm_limit(hourly, account.realm)
                 was_blocked = account.daily_limit_blocked()
                 account.daily_token_limit = limit
                 if usage is not None:

@@ -758,7 +758,7 @@ def set_auth_disabled(accounts_dir, disabled):
 # and one that does only ever has to reason about a single number per guard.
 LIMIT_KEYS = ("reserve_credits", "daily_token_limit",
               "daily_credit_limit", "model_daily_token_limit",
-              "expiring_window_days")
+              "expiring_window_days", "hourly_token_limit")
 LIMIT_REALMS = ("intl", "cn")
 LIMIT_SCOPES = ("global",) + LIMIT_REALMS
 LIMITS_KEY = "limits"
@@ -973,6 +973,22 @@ def daily_token_limit(accounts_dir, realm=None):
 def set_daily_token_limit(accounts_dir, value):
     """Persist the daily token threshold. Returns the stored value."""
     return set_limit(accounts_dir, "daily_token_limit", "global", value)["global"]
+
+
+def hourly_token_limit(accounts_dir, realm=None):
+    """Per-account, per-clock-hour token guard（节律限速）.
+
+    固定钟点桶（本地时间整点切换）：一个账号在这个小时内累计烧满该值就
+    暂时不出单，下个整点自动恢复。与 daily_token_limit 的「按天停一整天」
+    不同，它把「7×24 均匀打满」变成「有起伏的小时节律」。
+    Zero disables the guard（默认关，老安装行为不变）。
+    """
+    return limit_value(accounts_dir, "hourly_token_limit", realm)
+
+
+def set_hourly_token_limit(accounts_dir, value):
+    """Persist the hourly token threshold. Returns the stored value."""
+    return set_limit(accounts_dir, "hourly_token_limit", "global", value)["global"]
 
 
 def daily_credit_limit(accounts_dir, realm=None):

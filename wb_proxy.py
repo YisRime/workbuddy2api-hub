@@ -923,6 +923,14 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
                                      / fields["prompt_tokens"], 1)
     _persist_usage(row, "usage persist failed")
     try:
+        # 记进当前账号的小时节律桶（wb_settings.hourly_token_limit 用，
+        # 默认关）；失败只影响节律计数，不影响请求。
+        served = pool_account(account) if account else None
+        if served is not None:
+            served.note_hourly_usage(row.get("total_tokens") or 0)
+    except Exception:
+        pass
+    try:
         t_tokens = fields.get("total_tokens", 0)
         dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
         acc_tag = f" acct={account[:8]}" if account else ""
