@@ -33,12 +33,30 @@ SECRET_HEADERS = {
     "x-machine-id", "x-device-id", "x-session-id", "x-client-id",
     "sec-websocket-key",
 }
-
+# 2026-10-24 实测抓包复盘：X-Refresh-Token 是活凭证（可用它轮换 access
+# token）、X-Device-Token 是本机 TuringShield 设备凭证，两者当时都不在
+# SECRET_HEADERS 里、原样落了盘。头名脱敏不能只靠精确名单：凡是归一化后
+# 的头名带 token/secret/password/cookie/apikey 等字样的一律掩码，形状
+# （长度）保留。
 SECRET_KEY_HINTS = (
     "token", "secret", "password", "passwd", "cookie", "apikey",
     "uid", "userid", "machineid", "sessionid", "deviceid",
     "email", "phone", "mobile", "authorization",
 )
+
+MASKED_MARK = "<redacted:"
+
+
+def _norm_key(name):
+    return re.sub(r"[-_]", "", str(name or "").lower())
+
+
+def is_secret_header(name):
+    key = str(name or "").lower()
+    if key in SECRET_HEADERS:
+        return True
+    norm = _norm_key(name)
+    return any(hint in norm for hint in SECRET_KEY_HINTS)
 
 _HEX32 = re.compile(r"[0-9a-fA-F]{32}")
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -47,10 +65,6 @@ _LONG_NUM = re.compile(r"\b\d{5,}\b")
 
 
 # ------------------------------------------------------------------ 脱敏
-
-def _norm_key(name):
-    return re.sub(r"[-_]", "", str(name or "").lower())
-
 
 def mask_value(value):
     text = "" if value is None else str(value)
@@ -64,7 +78,7 @@ def mask_value(value):
 def redact_headers(pairs):
     out = []
     for name, value in pairs:
-        if str(name or "").lower() in SECRET_HEADERS:
+        if is_secret_header(name):
             out.append([name, mask_value(value)])
         else:
             out.append([name, value])
