@@ -75,20 +75,20 @@ def dashed_uuid(value):
     return len(value) == 36 and value.count("-") == 4
 
 
-INTL_UA = "VSCode/1.118.0 coding-copilot/4.12.39997873"
+INTL_UA = "VSCode/1.118.1 CodeBuddy/4.12.39997873"
 
 print("[1] product constants follow the official extension")
 check("productVersion is 4.12.39997873",
       wb_identity.VSCODE_PRODUCT_VERSION == "4.12.39997873")
-check("host VSCode version stays 1.118.0 (constant, measured host)",
-      wb_identity.VSCODE_IDE_VERSION == "1.118.0")
+check("host VSCode version stays 1.118.1 (measured host)",
+      wb_identity.VSCODE_IDE_VERSION == "1.118.1")
 check("UA is VSCode/<host> CodeBuddy/<extension>",
       wb_identity.vscode_ua() == INTL_UA, wb_identity.vscode_ua())
 _saved_ide = os.environ.get("WB_VSCODE_IDE_VERSION")
 os.environ["WB_VSCODE_IDE_VERSION"] = "1.120.0"
 try:
     check("WB_VSCODE_IDE_VERSION overrides the host version",
-          wb_identity.vscode_ua() == "VSCode/1.120.0 coding-copilot/4.12.39997873",
+          wb_identity.vscode_ua() == "VSCode/1.120.0 CodeBuddy/4.12.39997873",
           wb_identity.vscode_ua())
 finally:
     if _saved_ide is None:
@@ -110,12 +110,15 @@ check("X-IDE-Type / X-IDE-Name are VSCode",
       (h.get("X-IDE-Type"), h.get("X-IDE-Name")) == ("VSCode", "VSCode"),
       (h.get("X-IDE-Type"), h.get("X-IDE-Name")))
 check("X-IDE-Version is the host VSCode version (measured 1.118.1 host)",
-      h.get("X-IDE-Version") == "1.118.0", h.get("X-IDE-Version"))
-# 4.12 解包实锤：主 chat 的 buildModelRequestHeaders 不含 X-Product /
-# X-Product-Version / X-Env-ID（它们只出现在非 chat 拦截器路径）。
-check("no X-Product / X-Product-Version / X-Env-ID on the main chat",
-      not any(k in h for k in ("X-Product", "X-Product-Version", "X-Env-ID")), 
-      sorted(set(("X-Product", "X-Product-Version", "X-Env-ID")) & set(h)))
+      h.get("X-IDE-Version") == "1.118.1", h.get("X-IDE-Version"))
+# 4.12 鉴权后 wire 实测（vscode-chat.jsonl:120）：X-Product /
+# X-Product-Version / X-Env-ID / X-Request-Trace-Id 都在（请求实例层）。
+check("X-Product / X-Product-Version / X-Env-ID are present on chat",
+      (h.get("X-Product"), h.get("X-Product-Version"), h.get("X-Env-ID"))
+      == ("SaaS", "4.12.39997873", "production"),
+      (h.get("X-Product"), h.get("X-Product-Version"), h.get("X-Env-ID")))
+check("X-Request-Trace-Id is a dashed uuid on chat",
+      dashed_uuid(h.get("X-Request-Trace-Id")), h.get("X-Request-Trace-Id"))
 check("X-Model-ID carries this request's model",
       h.get("X-Model-ID") == "deepseek-v4.1-flash", h.get("X-Model-ID"))
 check("X-Agent-Intent is craft, X-Agent-Type is main",
@@ -176,9 +179,7 @@ check("X-B3-SpanId and X-B3-ParentSpanId are 16 hex",
 check("no traceparent on the VSCode identity",
       "traceparent" not in trace)
 check("X-B3-Sampled is 1", trace.get("X-B3-Sampled") == "1")
-# X-Request-Trace-Id 只属于非 chat 拦截器（4.12 解包），主 chat 不发。
-check("no X-Request-Trace-Id on the main chat",
-      "X-Request-Trace-Id" not in trace)
+
 
 print()
 print("[5] X-Private-Data follows the official domestic-site rule")
@@ -303,9 +304,9 @@ if len(upstream.calls) >= 2:
     second = header_map(upstream.calls[1])
     check("UA goes out as the official one", first.get("user-agent") == INTL_UA,
           first.get("user-agent"))
-    check("X-IDE-Version goes out; no X-Product-Version on the main chat",
-          first.get("x-ide-version") == "1.118.0"
-          and "x-product-version" not in first)
+    check("X-IDE-Version / X-Product-Version go out (wire shape)",
+          first.get("x-ide-version") == "1.118.1"
+          and first.get("x-product-version") == "4.12.39997873")
     check("X-Model-ID goes out with the payload's model",
           first.get("x-model-id") == PAYLOAD["model"], first.get("x-model-id"))
     check("X-Agent-Intent / X-Agent-Type / X-Private-Data go out",

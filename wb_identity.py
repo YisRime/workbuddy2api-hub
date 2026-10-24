@@ -159,9 +159,12 @@ CLI_BODY_DROP_FIELDS = ("metadata", "conversation_id", "previous_response_id")
 # platformVersion 是宿主的 VSCode 版本（扩展从 vscode.env 取），hub 没有宿主，
 # 默认 1.118.0（Open VSX 4.12.39997873 抓包实测的宿主版本），可用 WB_VSCODE_IDE_VERSION 覆盖。
 VSCODE_PRODUCT_VERSION = "4.12.39997873"
-VSCODE_IDE_VERSION = "1.118.0"
+VSCODE_IDE_VERSION = "1.118.1"
 VSCODE_PLATFORM = "VSCode"
-VSCODE_PRODUCT_NAME = "coding-copilot"
+# UA 第二段按端点分形态:chat 是 CodeBuddy(鉴权后 wire 实测,
+# capture/vscode-chat.jsonl:120),/v3/config 是 coding-copilot(启动期
+# wire)。chat 形态是主形态。
+VSCODE_PRODUCT_NAME = "CodeBuddy"
 
 
 def vscode_ide_version():
@@ -607,9 +610,10 @@ def build_identity_headers(product, realm, uid, token,
         #   - buildAuthHeaders 加 X-User-Id / Authorization Bearer /
         #     X-Enterprise-Id+X-Tenant-Id（企业号）/ X-Domain（auth.domain）/
         #     X-Department-Info（ar=true 时）；
-        #   - UA 由全局 axios 拦截器注入：VSCode/<宿主版本> coding-copilot/<扩展
-        #     版本>（启动期 wire cap:vscode.jsonl:14 实锤——第二段是
-        #     coding-copilot，不是旧解包笔记里的 CodeBuddy）；
+        #   - UA 由请求实例层注入：chat 上是
+        #     VSCode/<宿主> CodeBuddy/<扩展版本>（鉴权后 wire
+        #     capture/vscode-chat.jsonl:120 实锤；/v3/config 才是
+        #     coding-copilot 第二段——两个端点两种 UA）；
         #   - 保留名单：非直连时 contextHeaders 里 agent-type / root-request-id /
         #     parent-conversation-id 会被剥掉重建（Jn/zn），X-Product 不在
         #     buildModelRequestHeaders 的显式集合里——主 chat **不发** X-Product
@@ -624,6 +628,15 @@ def build_identity_headers(product, realm, uid, token,
             "X-IDE-Type": VSCODE_PLATFORM,
             "X-IDE-Name": VSCODE_PLATFORM,
             "X-IDE-Version": vscode_ide_version(),
+            # X-Product / X-Product-Version / X-Env-ID / X-Request-Trace-Id:
+            # 鉴权后 wire 实测都在（vscode-chat.jsonl:120）——它们来自请求
+            # 实例层，buildModelRequestHeaders 只是显式层（2026-10-25 修正
+            # 上一轮"不在主 chat"的错误结论，旧解包笔记的"全局拦截器"模型
+            # 才是对的）。
+            "X-Product": "SaaS",
+            "X-Product-Version": vscode_product_version(),
+            "X-Env-ID": VSCODE_ENV_ID,
+            "X-Request-Trace-Id": new_request_trace_id(),
             "X-Domain": endpoint_for(realm, product)[1],
             "User-Agent": vscode_ua(),
             "X-User-Id": str(uid or "anonymous"),

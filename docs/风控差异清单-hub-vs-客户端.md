@@ -351,6 +351,26 @@ local 模式/UAC);local 模式抓不到走回环代理(Clash 7890)的流量,这�
    把非 chat 拦截器的头混进了 chat 形态)。详见 wb_identity VSCode 分支注。
 5. **国内版**:整版无实测样本,需在国内版客户端上复刻本轮流程抓一轮。
 
+### 6.7 第七轮(2026-10-25):VSCode 鉴权后 live wire、CLI CN 探针
+
+- **VSCode 鉴权后 live wire**(capture/vscode-chat.jsonl:120,http.proxy +
+  隔离 profile 路线,登录流 auth/token→login/account 全部落盘)修正上一轮
+  解包结论:**X-Product / X-Product-Version / X-Env-ID / X-Request-Trace-Id
+  都在主 chat 上**(来自请求实例层,buildModelRequestHeaders 只是显式层——
+  上一轮只看显式层删错了,旧解包笔记的"全局拦截器"模型才是对的);UA 在
+  chat 上是 `VSCode/<宿主> CodeBuddy/<ext>`(coding-copilot 第二段只在
+  /v3/config);`Content-Type: application/json;charset=UTF-8`;无显式
+  Accept(undici 默认 `*/*`);**X-Device-Token-Error 实测在发**(值
+  sdk_not_initialized,19 字符,与 webpack 占位分析互证);无
+  x-codebuddy-request/baggage/acp-connection-id;id 关系与 B3 四段父 span
+  与 hub 现状一致。hub VSC 分支已按 live wire 重排(1.118.1 实测宿主)。
+- **CLI CN 探针**(CODEBUDDY_BASE_URL=copilot.tencent.com + 假 token,
+  capture/vscode-chat.jsonl:131):CN 端点对无效 token 回 **302 重定向到
+  www.codebuddy.cn**(intl APISIX 是 401);请求头族与 intl CLI 完全同构
+  (baggage/x-requested-with/x-codebuddy-request/stainless/b3 四段),
+  X-IDE-Version 2.175.0(npm latest 又漂了一版,头族稳定);gzip 跳过是
+  BASE_URL 模式已知伪影。CN 鉴权后 wire 待真实 CN 账号登录补录。
+
 ### 6.6 第六轮(2026-10-24 深夜):Accept-Encoding 落地、节律限速、VSCode 对齐
 
 - **Accept-Encoding + 解压层**:`wb_accounts.urlopen` 中心包装

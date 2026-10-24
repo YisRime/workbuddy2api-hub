@@ -117,16 +117,19 @@ class DesktopChatShapeTests(unittest.TestCase):
             other_account.headers(purpose="chat",
                                   session_key="sess-1")["acp-connection-id"])
 
-    def test_vscode_follows_the_unpacked_412_shape(self):
+    def test_vscode_follows_the_measured_412_wire(self):
         headers = intl_account(product="vscode").headers(purpose="chat")
-        # 4.12.39997873 解包实锤：Accept 是 text/event-stream（SSE），无
-        # Origin/Referer/X-Product/X-Env-ID/X-Request-Trace-Id。
-        self.assertEqual(headers["Accept"], "text/event-stream")
+        # 4.12.39997873 鉴权后 wire 实测（capture/vscode-chat.jsonl:120）：
+        # charset Content-Type、无显式 Accept（undici */*）、实例层四头都在、
+        # 设备头只有 error 占位（19 字符 sdk_not_initialized）。
+        self.assertEqual(headers["Accept"], "*/*")
         self.assertEqual(headers["User-Agent"],
-                         "VSCode/1.118.0 coding-copilot/4.12.39997873")
+                         "VSCode/1.118.1 CodeBuddy/4.12.39997873")
+        self.assertEqual(headers["X-Product"], "SaaS")
+        self.assertEqual(headers["X-Product-Version"], "4.12.39997873")
+        self.assertEqual(headers["X-Env-ID"], "production")
         self.assertNotIn("Origin", headers)
-        self.assertNotIn("X-Product", headers)
-        self.assertNotIn("X-Request-Trace-Id", headers)
+        self.assertNotIn("x-codebuddy-request", headers)
         self.assertNotIn("acp-connection-id", headers)
 
 
