@@ -99,7 +99,7 @@ check("the endpoint table is untouched",
       wb_identity.endpoint_for("intl", "vscode")
       == ("https://www.workbuddy.ai", "www.workbuddy.ai")
       and wb_identity.endpoint_for("cn", "vscode")
-      == ("https://www.workbuddy.cn", "www.workbuddy.cn"))
+      == (wb_identity.CN_CHAT_BASE, "www.codebuddy.cn"))
 
 print()
 print("[2] the VSCode chat headers match the official extension")
@@ -186,7 +186,7 @@ print("[5] X-Private-Data follows the official domestic-site rule")
 cn = wb_identity.build_identity_headers("vscode", "cn", "u1", "tok")
 check("the CN site does not send X-Private-Data",
       "X-Private-Data" not in cn)
-check("the CN site keeps the CN domain", cn.get("X-Domain") == "www.workbuddy.cn")
+check("the CN site keeps the CN account domain (cap:693)", cn.get("X-Domain") == "www.codebuddy.cn")
 check("the CN site uses the same UA",
       cn.get("User-Agent") == INTL_UA, cn.get("User-Agent"))
 

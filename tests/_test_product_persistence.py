@@ -94,8 +94,10 @@ check("to_dict() writes it, so the next save keeps it",
       cn.to_dict().get("product") == "vscode", cn.to_dict().get("product"))
 check("the chat endpoint follows it",
       cn.chat_base_url() == wb_identity.endpoint_for("cn", "vscode")[0], cn.chat_base_url())
-check("and that is not the desktop endpoint",
-      cn.chat_base_url() != wb_identity.endpoint_for("cn", "workbuddy")[0])
+# 2026-10-25 CN wire 实测：VSC CN 与桌面 CN 的 chat 端点同形（都跟账号域
+# 到 CN_CHAT_BASE），旧断言"两者不同"已过时——现在断言同形。
+check("the CN VSC endpoint matches the CN desktop one (measured)",
+      cn.chat_base_url() == wb_identity.endpoint_for("cn", "workbuddy")[0])
 desktop = A.Account(credential("workbuddy", realm="cn", domain="www.workbuddy.cn"))
 check("the outbound headers follow it",
       cn.headers().get("X-IDE-Type") == "VSCode"

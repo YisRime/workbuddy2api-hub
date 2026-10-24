@@ -52,8 +52,9 @@ LEGACY = "https://copilot.tencent.com"
 
 class CnChatUpstreamTest(unittest.TestCase):
     def assert_default(self, got):
-        self.assertEqual(got["desktop"], [LEGACY, "copilot.tencent.com"])
-        self.assertEqual(got["cli"], [LEGACY, "copilot.tencent.com"])
+        # X-Domain 兜底改按账号域 www.codebuddy.cn(2026-10-25 CN CLI 实测)。
+        self.assertEqual(got["desktop"], [LEGACY, "www.codebuddy.cn"])
+        self.assertEqual(got["cli"], [LEGACY, "www.codebuddy.cn"])
         self.assertEqual(got["realm_upstream"], LEGACY)
         self.assertEqual(got["tasks"], LEGACY)
 
@@ -67,13 +68,14 @@ class CnChatUpstreamTest(unittest.TestCase):
         got = probe("https://www.workbuddy.cn/")
         base = "https://www.workbuddy.cn"
         # 只换"往哪发"：X-Domain 兜底值与 REALM_CONFIGS 的 domain 都不动。
-        self.assertEqual(got["desktop"], [base, "copilot.tencent.com"])
-        self.assertEqual(got["cli"], [base, "copilot.tencent.com"])
+        self.assertEqual(got["desktop"], [base, "www.codebuddy.cn"])
+        self.assertEqual(got["cli"], [base, "www.codebuddy.cn"])
         self.assertEqual(got["realm_upstream"], base)
         self.assertEqual(got["realm_domain"], "copilot.tencent.com")
         self.assertEqual(got["tasks"], base)
-        # VSCode 身分本来就走 workbuddy.cn，国际版不受影响。
-        self.assertEqual(got["vscode"], ["https://www.workbuddy.cn", "www.workbuddy.cn"])
+        # VSC CN 与 CLI CN 同形（2026-10-25 鉴权后 wire 实测）：chat 端点跟随
+        # 账号域到 CN_CHAT_BASE，X-Domain 是账号域 www.codebuddy.cn。
+        self.assertEqual(got["vscode"], ["https://www.workbuddy.cn", "www.codebuddy.cn"])
         self.assertEqual(got["intl"], ["https://www.workbuddy.ai", "www.workbuddy.ai"])
 
     def test_invalid_value_is_ignored(self):

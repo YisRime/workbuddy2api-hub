@@ -369,7 +369,36 @@ local 模式/UAC);local 模式抓不到走回环代理(Clash 7890)的流量,这�
   www.codebuddy.cn**(intl APISIX 是 401);请求头族与 intl CLI 完全同构
   (baggage/x-requested-with/x-codebuddy-request/stainless/b3 四段),
   X-IDE-Version 2.175.0(npm latest 又漂了一版,头族稳定);gzip 跳过是
-  BASE_URL 模式已知伪影。CN 鉴权后 wire 待真实 CN 账号登录补录。
+  BASE_URL 模式已知伪影。CN 鉴权后 wire 已补录(真实 CN 账号登录,vscode-chat.jsonl:490/492):
+
+- **CN 的 X-Domain 是账号域 www.codebuddy.cn**,不是端点域
+  copilot.tencent.com——hub 三个 CN 身份的兜底值已全部修正;
+- **CN 也不发 X-Device-Token**(SDK-less 客户端国内外一致,§2 的"官方
+  失败态"问题有了答案:CLI 无此头构造,VSC 永远发 error 占位);
+- chat 端点 = copilot.tencent.com/v2/chat/completions(hub CN 默认正确;
+  CODEBUDDY_BASE_URL 覆盖模式会被 CN 边缘 302 到 www.codebuddy.cn 并
+  跳过 gzip——伪影,勿照抄);
+- CN 鉴权链路(auth/state→token 轮询→login/account→accounts→v3/config)
+  与 intl 同族同路径,仅 host 换成 copilot.tencent.com;CN JWT 1546 字符、
+  X-User-Id 也是 36 位 UUID。
+
+### 6.8 第八轮(2026-10-25):VSC CN 鉴权后 wire(China Site 登录)
+
+扩展原生 China Site 登录(选择屏在登出态出现;Clear Session 只清聊天,
+清登录态需删扩展 globalStorage/state.vscdb)。鉴权后 wire
+(vscode-chat.jsonl:693/695):
+
+- **主 chat(693)**:与 intl VSC 形态一致——实例层四头都在、gzip、B3
+  四段父 span、无 X-Private-Data(CN ✓)、**X-Device-Token-Error 照发**、
+  **X-Domain: www.codebuddy.cn**、X-Model-ID: hy3(CN 目录);chat 端点
+  copilot.tencent.com——hub 的 ("cn", vscode) 已从 www.workbuddy.cn
+  修正为 (CN_CHAT_BASE, www.codebuddy.cn),与 CLI CN 同形;
+- **标题生成(695,axios 路径)**:`Accept: text/event-stream` 属于这条
+  axios 路径(此前解包把它当主 chat 的 Accept 是错置);`X-Agent-Intent:
+  generate-title`(新 intent 值);五个 id 头全同值(traceId 复用);
+  Connection: close;无 monitor_*。hub 不发辅助标题,不适用;
+- 三身份 × 两区域的 wire 证据至此齐全,除 X-Device-Token(桌面真值)外
+  无已知缺口。
 
 ### 6.6 第六轮(2026-10-24 深夜):Accept-Encoding 落地、节律限速、VSCode 对齐
 

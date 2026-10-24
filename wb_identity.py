@@ -344,9 +344,16 @@ _ENDPOINTS = {
     # so the international CLI identity rides the workbuddy.ai edge, which
     # accepts CLI headers and answers normally.
     ("intl", PRODUCT_CLI): ("https://www.workbuddy.ai", "www.workbuddy.ai"),
-    ("cn", PRODUCT_DESKTOP): (CN_CHAT_BASE, "copilot.tencent.com"),
-    ("cn", PRODUCT_VSCODE): ("https://www.workbuddy.cn", "www.workbuddy.cn"),
-    ("cn", PRODUCT_CLI): (CN_CHAT_BASE, "copilot.tencent.com"),
+    # CN 的 X-Domain 是**账号域** www.codebuddy.cn,不是端点域:2026-10-25
+    # CN CLI 鉴权后 wire 实测(capture/vscode-chat.jsonl:490/492,chat 打
+    # copilot.tencent.com 但 X-Domain=www.codebuddy.cn,200)。chat base 仍
+    # 是 CN_CHAT_BASE(实测正确);auth.domain 兜底两者同值。
+    ("cn", PRODUCT_DESKTOP): (CN_CHAT_BASE, "www.codebuddy.cn"),
+    # VSC CN 同 CLI CN:2026-10-25 鉴权后 wire 实测(capture/vscode-chat
+    # .jsonl:693)——CN 登录的扩展 chat 打 copilot.tencent.com(X-Domain
+    # www.codebuddy.cn),不是旧结论的 www.workbuddy.cn。
+    ("cn", PRODUCT_VSCODE): (CN_CHAT_BASE, "www.codebuddy.cn"),
+    ("cn", PRODUCT_CLI): (CN_CHAT_BASE, "www.codebuddy.cn"),
 }
 
 
