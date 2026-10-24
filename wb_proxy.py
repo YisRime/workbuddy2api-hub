@@ -14395,12 +14395,20 @@ def _desktop_conv_lifecycle(account, session_key, upstream_body):
     return conv_id, touch
 
 
-def _bg_cloud_conv_touch(account, session_key, title):
-    """对话成功后的伴随 PATCH（title/activity）——后台线程，失败静默。"""
-    try:
-        account.touch_cloud_conversation(session_key, title=title)
-    except Exception:
-        pass
+def _bg_turn_companions(account, cloud_conv_touch, report_ctx):
+    """对话成功后的伴随动作（云端会话 PATCH + /v2/report 事件）——后台线程，
+    每项独立吞异常，一个失败不影响另一个。"""
+    if cloud_conv_touch:
+        try:
+            account.touch_cloud_conversation(cloud_conv_touch[0],
+                                             title=cloud_conv_touch[1])
+        except Exception:
+            pass
+    if report_ctx:
+        try:
+            account.report_chat_turn(**report_ctx)
+        except Exception:
+            pass
 
 
 def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None,
@@ -14585,6 +14593,10 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 return None
 
     attempt = 0
+    # 扇出上限：同一请求体最多发给 N 个**不同**账号（prompt 内容指纹是跨账号
+    # 关联信号，wb_settings.fanout_max_accounts；同账号原地重试不占额度）。
+    fanout_max = wb_settings.fanout_max_accounts(ACCOUNTS_DIR)
+    fanout_seen = set()
     while True:
         attempt += 1
         if attempt > max_attempts:
@@ -14694,6 +14706,33 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             conversation_id=conv_id)
         if wb_identity.product_feature("RequestBodyGzip"):
             req_headers["Content-Encoding"] = wb_identity.REQUEST_CONTENT_ENCODING
+        # 达到扇出上限：不再把这个 body 发给下一个账号，跳出循环走错误上报
+        # （把最后的上游错误原样交还客户端，而不是继续扩大扩散面）。
+        if (fanout_max and account.uid not in fanout_seen
+                and len(fanout_seen) >= fanout_max):
+            log("fanout cap: this body already went to %d account(s); "
+                "returning the upstream error instead of trying account %d"
+                % (len(fanout_seen), len(fanout_seen) + 1))
+            break
+        fanout_seen.add(account.uid)
+        # 对话伴随 /v2/report 事件（cap:720/734：chat_message_send +
+        # chat_request_send，字段与头族同源）。官方每轮 chat 后必发，hub 账号
+        # 此前一条不发，时间序列上是逐轮可见的「有 chat 无遥测」。
+        report_ctx = None
+        if (wb_settings.chat_reports_enabled(ACCOUNTS_DIR)
+                and account.product in (wb_identity.PRODUCT_DESKTOP,
+                                        wb_identity.PRODUCT_CLI) and model):
+            report_ctx = {
+                "conversation_id": req_headers.get("X-Conversation-ID", ""),
+                "request_id": req_headers.get("X-Conversation-Request-ID", ""),
+                "message_id": req_headers.get("X-Conversation-Message-ID", ""),
+                "trace_id": req_headers.get("X-Trace-ID", ""),
+                "root_request_id": req_headers.get("X-Root-Request-ID", ""),
+                "model": model,
+                "messages": len(upstream_body.get("messages") or []),
+                "input_length": len(_first_user_text(upstream_body)),
+                "temperature": upstream_body.get("temperature"),
+            }
         req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
                                      headers=req_headers)
         req.wb_exact_headers = list(req_headers.items())
@@ -14715,12 +14754,13 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             # 标记置空，循环开头就不会再重复归还。
             bind_account_slot_to_response(resp, account)
             slot_held = None
-            if cloud_conv_touch:
-                # 伴随 PATCH（title/activity，cap:701/724/731）不挡响应：
-                # 官方也是异步发的，这里后台线程 best-effort。
+            if cloud_conv_touch or report_ctx:
+                # 伴随动作（云端 PATCH + /v2/report 事件）不挡响应：官方也是
+                # 异步发的，这里后台线程 best-effort。
                 threading.Thread(
-                    target=_bg_cloud_conv_touch, args=(account,) + cloud_conv_touch,
-                    daemon=True, name="wb-cloud-conv-touch").start()
+                    target=_bg_turn_companions, daemon=True,
+                    name="wb-turn-companions",
+                    args=(account, cloud_conv_touch, report_ctx)).start()
             # The third element is the reasoning effort this request ran at: the
             # body is rebuilt per attempt, but the effort is a property of the
             # model and the request, and the callers record it on the usage row.

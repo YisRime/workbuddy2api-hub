@@ -2767,6 +2767,92 @@ class Account(object):
                 rec["id"], {"lastActivityAtMs": int(time.time() * 1000),
                             "updatedAtMs": rec["created_ms"]})
 
+    def _report_headers(self):
+        """/v2/report 的桌面主组件头（cap:720/734：UA 是 desktop_ua 三段式，
+        带 X-Requested-With，无 Origin/Referer）。"""
+        headers = self._desktop_console_headers()
+        headers["Accept"] = "application/json, text/plain, */*"
+        headers["User-Agent"] = wb_identity.desktop_ua(self.realm)
+        headers["X-Requested-With"] = "XMLHttpRequest"
+        return headers
+
+    def report_chat_turn(self, conversation_id="", request_id="", message_id="",
+                         trace_id="", root_request_id="", model="",
+                         messages=0, input_length=0, temperature=None):
+        """每轮对话的 /v2/report 伴随事件（cap:720/734 实测形态）。
+
+        官方客户端每轮 chat 后发 chat_message_send + chat_request_send，
+        字段与 chat 头族同源（conversationId / requestId / messageId /
+        traceId 与请求头同值）——hub 账号此前一条不发，在上游时间序列上是
+        逐轮可见的「有 chat 无遥测」。best-effort：失败静默不影响请求。
+        """
+        directory = getattr(self, "accounts_dir", "")
+        if not directory and self.path:
+            directory = os.path.dirname(self.path)
+        if directory and not wb_settings.chat_reports_enabled(directory):
+            return False
+        if not model:
+            return False
+        now_ms = int(time.time() * 1000)
+        events = [
+            {
+                "eventCode": "chat_message_send",
+                "timestamp": now_ms,
+                "reportDelay": 200,
+                "conversationId": conversation_id,
+                "requestId": request_id,
+                "messageId": message_id,
+                "requestModelId": model,
+                "requestModelName": model,
+                "historyCount": max(0, int(messages or 0) - 2),
+                "isContextTruncated": False,
+                "currentStepCount": 1,
+                "totalStepCount": 1,
+                "compactionCount": 0,
+                "presentAt": now_ms,
+                "traceId": trace_id,
+                "rootRequestId": root_request_id or request_id,
+                "parentConversationId": conversation_id,
+            },
+            {
+                "eventCode": "chat_request_send",
+                "timestamp": now_ms,
+                "reportDelay": 300,
+                "mode": "craft",
+                "conversationId": conversation_id,
+                "requestId": request_id,
+                "inputLength": int(input_length or 0),
+                "requestModelId": model,
+                "requestModelName": model,
+                "isPlan": False,
+                "isAutoExecuteTerminal": False,
+                "isAutoModify": False,
+                "codebaseEnable": False,
+                "maxSteps": 500,
+                "temperature": (temperature
+                                if isinstance(temperature, (int, float))
+                                and not isinstance(temperature, bool) else 0),
+                "maxRetries": 0,
+                "mentionContexts": [],
+                "knowledgeId": [],
+                "knowledgeName": [],
+                "codebaseId": "",
+                "mentionContextCount": 0,
+                "command": "",
+            },
+        ]
+        cfg = get_realm_config(self.realm)
+        req = urllib.request.Request(
+            cfg["chat_upstream"] + "/v2/report",
+            data=json.dumps(events, ensure_ascii=False).encode("utf-8"),
+            headers=self._report_headers(), method="POST")
+        try:
+            with urlopen(req, timeout=10, proxy=self.proxy) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        except Exception:
+            return False
+        return isinstance(payload, dict) and payload.get("code") in (0, None)
+
     def daily_chat(self, web=None, trigger="unknown"):
         """国际版每日活跃对话（官方每日活跃 30/50 积分）。
 

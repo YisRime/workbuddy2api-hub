@@ -1867,6 +1867,38 @@ def cloud_conversations_enabled(accounts_dir):
     return load(accounts_dir).get("cloud_conversations") is not False
 
 
+def chat_reports_enabled(accounts_dir):
+    """对话伴随 /v2/report 事件开关（默认开）。
+
+    官方桌面与 CLI 每轮 chat 后都发 chat_message_send / chat_request_send
+    （cap:720/734、cli.jsonl:71/76）；置 `"chat_reports": false` 关闭。
+    env `WB_CHAT_REPORTS`（0/false/off 关，1/true/on 开）优先于 settings。
+    """
+    raw = str(os.environ.get("WB_CHAT_REPORTS") or "").strip().lower()
+    if raw in ("0", "false", "off"):
+        return False
+    if raw in ("1", "true", "on"):
+        return True
+    return load(accounts_dir).get("chat_reports") is not False
+
+
+def fanout_max_accounts(accounts_dir):
+    """同一请求体（同一 prompt 内容）最多扇出给几个**不同**账号。
+
+    重试换号会把同一 body 秒级重发给下一个账号——prompt 内容本身成了
+    跨账号关联信号（与 11140 的「同设备连坐」同类）。默认 2：首个账号
+    失败后最多再换一个；0 = 不设限（旧行为）。env `WB_FANOUT_MAX` 优先。
+    同一账号的原地重试（token 刷新后重发）不计入扇出。
+    """
+    raw = os.environ.get("WB_FANOUT_MAX")
+    if raw is None:
+        raw = load(accounts_dir).get("fanout_max_accounts")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 2
+
+
 def identity_private_data(accounts_dir):
     """The configured X-Private-Data override: auto, true or false."""
     raw = load(accounts_dir).get(IDENTITY_KEY)

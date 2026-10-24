@@ -189,6 +189,10 @@ class TestResponseBinding(_SettingsDirMixin, unittest.TestCase):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wb_accounts as A  # noqa: E402
+# 本套件聚焦轮换/切换语义：关掉默认的扇出上限（wb_settings.
+# fanout_max_accounts，默认 2），恢复全池轮换的旧行为。
+os.environ.setdefault("WB_FANOUT_MAX", "0")
+os.environ.setdefault("WB_CHAT_REPORTS", "0")  # 伴随 /v2/report 也不发
 # 本套件聚焦重试/轮换逻辑：关掉桌面云端会话生命周期（默认开，
 # wb_settings.cloud_conversations_enabled），免得 create 多吃 mock 队列。
 A.Account.cloud_conversation = lambda self, session_key, first_text="": ""
