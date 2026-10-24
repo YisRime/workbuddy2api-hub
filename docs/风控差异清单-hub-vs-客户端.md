@@ -350,3 +350,25 @@ local 模式/UAC);local 模式抓不到走回环代理(Clash 7890)的流量,这�
    X-Product / X-Product-Version / X-Env-ID / X-Request-Trace-Id(旧解包
    把非 chat 拦截器的头混进了 chat 形态)。详见 wb_identity VSCode 分支注。
 5. **国内版**:整版无实测样本,需在国内版客户端上复刻本轮流程抓一轮。
+
+### 6.6 第六轮(2026-10-24 深夜):Accept-Encoding 落地、节律限速、VSCode 对齐
+
+- **Accept-Encoding + 解压层**:`wb_accounts.urlopen` 中心包装
+  `DecodingResponse`(gzip 流式/deflate 流式,兼容 zlib 容器误发;
+  read/read1/readline/迭代全覆盖),国际版各请求声明 `gzip, deflate`
+  (只声明会解的;官方四档中 compress/br 无标准库实现)。压缩流 length=0,
+  未压缩透传保留 #522 截断启发。CN 域真机冒烟通过(透传分支不破坏现有
+  链路)。
+- **每小时 token 节律**:`limits.hourly_token_limit`(默认 0=关),固定
+  钟点桶,`ready()` 把达限账号摘出调度,把「7×24 均匀打满」变成小时级
+  起伏。与 daily limit 互补。
+- **VSCode 分支对齐**(解包 4.12.39997873 + 启动期 wire):UA 第二段
+  `coding-copilot`、Accept `text/event-stream`、主 chat 不发 X-Product/
+  X-Product-Version/X-Env-ID/X-Request-Trace-Id。至此**三身份全部有
+  权威形态依据**(wb/cli=鉴权后 live wire,vsc=同版本 vsix 解包+启动期
+  wire)。方法学事故记录:扩展宿主不继承窗口代理 env;local 模式按进程
+  名 `Code` 拦截会波及日常 VS Code(已回滚,未留系统残留)。
+- **结构性项最终口径**:X-Device-Token(intl 实测带 v3 token,hub 不伪造
+  ——生成不了真值,伪值更显眼;cn 待实测);国内版整版仍无实测样本。
+  三身份的头族/body/id 语义/会话生命周期/伴随遥测均已对齐,剩余项只有
+  这两条结构性缺口与国内版实测。
