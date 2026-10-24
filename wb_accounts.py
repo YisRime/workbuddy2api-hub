@@ -1,6 +1,7 @@
 import re
 import base64
 import datetime
+import gzip
 import json
 import os
 import random
@@ -12,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zlib
 from wb_fingerprint import derive_id, generate_request_id, session_id
 import wb_activity
 import wb_atrest
@@ -278,6 +280,191 @@ def opener_for_proxy(proxy):
         return opener
 
 
+#: 出站声明的 Accept-Encoding：只声明解压层会解的算法（gzip/deflate，纯
+#: 标准库）。官方客户端发 `gzip, compress, deflate, br`——brotli 没有标准
+#: 库实现，伪造声明而不会解会让响应变成乱码，所以只发这两档（2026-10-24
+#: 实测差异清单 §6.4 的折中）。
+ACCEPT_ENCODING = "gzip, deflate"
+
+
+class _DeflateReader(object):
+    """raw deflate（zlib -MAX_WBITS）流式解压；兼容服务器误发 zlib 容器。
+
+    read / read1 / readline / 迭代都支持——SSE 路径走的是 read1。
+    """
+
+    def __init__(self, raw):
+        self._raw = raw
+        self._dec = zlib.decompressobj(-zlib.MAX_WBITS)
+        self._buf = bytearray()
+        self._done = False
+        self._first = True
+
+    def _push(self, chunk):
+        try:
+            self._buf += self._dec.decompress(chunk)
+        except zlib.error:
+            if not self._first:
+                raise
+            # 有些服务器把 zlib 容器(wbits=15)当 deflate 发：首个块就报错时
+            # 换容器重解一次。
+            self._dec = zlib.decompressobj()
+            self._buf += self._dec.decompress(chunk)
+        self._first = False
+        if self._dec.eof:
+            self._done = True
+
+    def _fill(self):
+        if self._done:
+            return False
+        chunk = self._raw.read(65536)
+        if not chunk:
+            self._buf += self._dec.flush()
+            self._done = True
+            return False
+        self._push(chunk)
+        return True
+
+    def read(self, size=-1):
+        while (size < 0 or len(self._buf) < size) and self._fill():
+            pass
+        if size is None or size < 0 or size >= len(self._buf):
+            out = bytes(self._buf)
+            del self._buf[:]
+        else:
+            out = bytes(self._buf[:size])
+            del self._buf[:size]
+        return out
+
+    def read1(self, size=-1):
+        if not self._buf and not self._fill():
+            return b""
+        want = size if (size is not None and size > 0) else len(self._buf)
+        out = bytes(self._buf[:want])
+        del self._buf[:want]
+        return out
+
+    def readline(self, size=-1):
+        while b"\n" not in self._buf and self._fill():
+            pass
+        end = self._buf.find(b"\n")
+        end = len(self._buf) if end < 0 else end + 1
+        if size is not None and size > 0 and end > size:
+            end = size
+        out = bytes(self._buf[:end])
+        del self._buf[:end]
+        return out
+
+    def __iter__(self):
+        while True:
+            line = self.readline()
+            if not line:
+                return
+            yield line
+
+    def close(self):
+        try:
+            self._raw.close()
+        except Exception:
+            pass
+
+
+class DecodingResponse(object):
+    """按 Content-Encoding 解包响应体（gzip / deflate），其余属性转发原始响应。
+
+    上游对带 Accept-Encoding 的请求可能回压缩体，Python 的 http.client 不会
+    自动解压。包在 wb_accounts.urlopen 这个中心点上，chat 流式（read1 逐块）、
+    billing / catalog / 云会话 / 伴随上报的非流式 read 一起受益。
+
+    `length` 语义：解压流固定 0——截断由解压器抛错暴露，iter_sse_lines 的
+    IncompleteRead 启发式（按 Content-Length 判断，issue #522）对压缩体天然
+    不适用；未压缩的透传分支保留原始 length，不改变现有截断检测。
+    """
+
+    def __init__(self, raw):
+        self._raw = raw
+        headers = getattr(raw, "headers", None)
+        encoding = ""
+        if headers is not None:
+            try:
+                encoding = str(headers.get("Content-Encoding") or "").strip().lower()
+            except Exception:
+                encoding = ""
+        if encoding == "gzip":
+            self._body = gzip.GzipFile(fileobj=raw, mode="rb")
+        elif encoding == "deflate":
+            self._body = _DeflateReader(raw)
+        else:
+            self._body = None
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+    @property
+    def length(self):
+        if self._body is not None:
+            return 0
+        return getattr(self._raw, "length", 0)
+
+    def read(self, size=-1):
+        if self._body is not None:
+            return self._body.read(size)
+        return self._raw.read(size)
+
+    def read1(self, size=-1):
+        if self._body is not None:
+            return self._body.read1(size)
+        read1 = getattr(self._raw, "read1", None)
+        if read1 is None:
+            return self._raw.read(size if (size is None or size < 0) else size)
+        return read1(size)
+
+    def readline(self, size=-1):
+        if self._body is not None:
+            return self._body.readline(size)
+        return self._raw.readline(size)
+
+    def __iter__(self):
+        source = self._body if self._body is not None else self._raw
+        while True:
+            line = source.readline()
+            if not line:
+                return
+            yield line
+
+    def close(self):
+        body = self._body
+        try:
+            if body is not None:
+                body.close()
+        except Exception:
+            pass
+        finally:
+            try:
+                self._raw.close()
+            except Exception:
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+def _open_response(req, timeout=30, proxy=""):
+    if wb_upstream_pool.enabled():
+        try:
+            return wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
+        except wb_upstream_pool.PoolBypass:
+            pass
+    opener = opener_for_proxy(proxy)
+    if opener is None:
+        return urllib.request.urlopen(req, timeout=timeout)
+    return opener.open(req, timeout=timeout)
+
+
 def urlopen(req, timeout=30, proxy=""):
     """urlopen honouring an optional per-account proxy, over a keep-alive pool.
 
@@ -292,16 +479,11 @@ def urlopen(req, timeout=30, proxy=""):
     头名保真：调用方若把有序 [(name, value)] 挂在 req.wb_exact_headers 上，
     池路径会原样发这些头名（见 wb_proxy.open_upstream）；没挂的请求（billing /
     登录 / 签到等）走原来的 .title() 路径，行为不变。
+
+    返回值统一包一层 DecodingResponse：带 Content-Encoding: gzip/deflate 的
+    响应自动解压（见类注释），未压缩响应行为与包装前一致。
     """
-    if wb_upstream_pool.enabled():
-        try:
-            return wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
-        except wb_upstream_pool.PoolBypass:
-            pass
-    opener = opener_for_proxy(proxy)
-    if opener is None:
-        return urllib.request.urlopen(req, timeout=timeout)
-    return opener.open(req, timeout=timeout)
+    return DecodingResponse(_open_response(req, timeout=timeout, proxy=proxy))
 
 
 def http_json(url, data=None, method=None, headers=None, timeout=30,
@@ -1848,6 +2030,7 @@ class Account(object):
                     "Accept-Language": "en",
                     "X-Request-ID": generate_request_id(self.uid),
                     "User-Agent": "axios/1.16.1",
+                    "Accept-Encoding": ACCEPT_ENCODING,
                 }
             # 静态 API Key：与 chat 链路口径一致，两个鉴权头都发。计费端点
             # 本身任一个都认，但统一形态省得两条路径各写一套。
@@ -1914,6 +2097,11 @@ class Account(object):
                 "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
             }
         headers.update(identity)
+        # 官方客户端的 SDK/axios 默认都带 Accept-Encoding（cap:727 实测
+        # `gzip, compress, deflate, br`）；解压层就绪后对齐为可解的两档。
+        # 国内版无实测，不发（服务器回明文，行为不变）。
+        if self.realm != "cn":
+            headers["Accept-Encoding"] = ACCEPT_ENCODING
         # 国际版不发 X-Device-Token（#448）；国内版保留真实 token 语义。
         # VSCode 非企业号仍按官方 token || error 的失败态发占位（#431）。
         device_token = (self._device_token()
@@ -2010,13 +2198,14 @@ class Account(object):
             "X-Requested-With": "XMLHttpRequest",
             "X-Domain": self.domain or cfg["domain"],
             "X-Refresh-Token": self.refresh_token,
-            "X-Auth-Refresh-Source": "plugin",
-            "X-Request-ID": generate_request_id(self.uid),
-            "X-Product": "SaaS",
-            "User-Agent": cfg["chat_ua"],
-            "Authorization": "Bearer " + self.access_token,
-            "X-User-Id": self.uid,
-        }
+                "X-Auth-Refresh-Source": "plugin",
+                "X-Request-ID": generate_request_id(self.uid),
+                "X-Product": "SaaS",
+                "User-Agent": cfg["chat_ua"],
+                "Authorization": "Bearer " + self.access_token,
+                "X-User-Id": self.uid,
+                "Accept-Encoding": ACCEPT_ENCODING,
+            }
 
     def _refresh_locked(self):
         if self.is_api_key:
@@ -2628,7 +2817,7 @@ class Account(object):
         """/console/as/* 的桌面主组件头（cap:686/692/724/736：10 头形态，
         无浏览器头，UA 是 desktop_console_ua 双段式，X-Request-ID 32hex）。"""
         cfg = get_realm_config(self.realm)
-        return {
+        headers = {
             "Accept": "application/json, text/plain, */*",
             "Content-Type": "application/json",
             "User-Agent": wb_identity.desktop_console_ua(self.realm),
@@ -2638,6 +2827,9 @@ class Account(object):
             "X-User-Id": self.uid,
             "X-Domain": self.domain or cfg["domain"],
         }
+        if self.realm != "cn":
+            headers["Accept-Encoding"] = ACCEPT_ENCODING
+        return headers
 
     def _cloud_workdir(self, now_ms):
         """workDir：官方是本地每会话工作目录（C:/Users/<用户>/WorkBuddy AI/

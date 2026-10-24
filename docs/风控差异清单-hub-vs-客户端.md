@@ -335,9 +335,10 @@ local 模式/UAC);local 模式抓不到走回环代理(Clash 7890)的流量,这�
 
 ### 6.5 剩余未对齐项(按风险排序)
 
-1. **`Accept-Encoding` 请求头**:客户端发 `gzip, compress, deflate, br`,
-   hub 不发。加上它就必须自己解压响应(Python 无自动解压;brotli 还需要
-   依赖)——需要先给读路径(SSE/JSON)加解压层再开,单独排期。
+1. ~~**`Accept-Encoding` 请求头**~~ **已对齐(2026-10-24 第五轮)**:hub
+   国际版声明 `gzip, deflate`(只声明会解的),`wb_accounts.urlopen` 中心
+   解压层(gzip/deflate 流式,read/read1/readline/迭代全覆盖);官方四档中
+   compress/br 无标准库实现,不声明。
 2. **X-Device-Token(国际版)**:实测客户端带 `v3:` TuringShield token,
    hub 生成不了、不伪造(见 §2 处置)。
 3. **header 顺序**:官方头的排列顺序(SDK 的插入序)hub 未复刻;HTTP/1.1

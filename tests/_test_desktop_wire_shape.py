@@ -37,16 +37,18 @@ CHAT_WIRE = {
     "X-Product", "User-Agent", "Authorization", "X-User-Id", "X-Domain",
     "Content-Length", "Accept-Encoding", "Host", "Connection",
 }
-# cap:711 的 15 头去掉传输层 4 头（Content-Length/Accept-Encoding/Host/Connection）。
+# cap:711 的 15 头去掉传输层 3 头（Content-Length/Host/Connection）；
+# Accept-Encoding 已由解压层对齐（gzip, deflate），计入 hub 集合。
 REFRESH_WIRE = {
     "Accept", "Content-Type", "X-Requested-With", "X-Domain",
     "X-Refresh-Token", "X-Auth-Refresh-Source", "X-Request-ID",
     "X-Product", "User-Agent", "Authorization", "X-User-Id",
+    "Accept-Encoding",
 }
-# cap:715 的 12 头去掉传输层 4 头。
+# cap:715 的 12 头去掉传输层 3 头；Accept-Encoding 同上。
 BILLING_WIRE = {
     "Accept", "Content-Type", "Authorization", "X-User-Id", "X-Domain",
-    "Accept-Language", "X-Request-ID", "User-Agent",
+    "Accept-Language", "X-Request-ID", "User-Agent", "Accept-Encoding",
 }
 # 独立 CLI 2.174.0 实测（capture/cli.jsonl，www.codebuddy.ai /v2/chat/completions
 # 401'd but fully assembled；去掉传输层与 Authorization/X-User-Id 的值后）。
