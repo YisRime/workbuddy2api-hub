@@ -189,6 +189,9 @@ class TestResponseBinding(_SettingsDirMixin, unittest.TestCase):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wb_accounts as A  # noqa: E402
+# 本套件聚焦重试/轮换逻辑：关掉桌面云端会话生命周期（默认开，
+# wb_settings.cloud_conversations_enabled），免得 create 多吃 mock 队列。
+A.Account.cloud_conversation = lambda self, session_key, first_text="": ""
 
 
 class _Sock(object):

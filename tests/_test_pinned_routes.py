@@ -16,6 +16,9 @@ from _isolated_dirs import isolated_data_dirs  # noqa: E402
 _TMP = isolated_data_dirs("wb-pinned-")
 
 import wb_accounts  # noqa: E402
+# 本套件聚焦重试/轮换逻辑：关掉桌面云端会话生命周期（默认开，
+# wb_settings.cloud_conversations_enabled），免得 create 多吃 mock 队列。
+wb_accounts.Account.cloud_conversation = lambda self, session_key, first_text="": ""
 import wb_proxy as P  # noqa: E402
 
 

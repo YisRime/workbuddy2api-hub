@@ -11,7 +11,7 @@ Sections [5]-[7] also pin the outbound identity against the 5.8.4 capture: the
 conversation header family every identity must carry (upstream answers 400 /
 code 11-128, `conversation id missing`, without it), the desktop version / UA /
 agent headers, and the id shapes (dashed UUID vs 32hex). Section [6b] pins the
-CLI identity against the official @tencent-ai/codebuddy-code 2.168.2 package:
+CLI identity against the official @tencent-ai/codebuddy-code package:
 version / UA, the agent header family, the four-segment b3 trace family, and
 the official id relations (stable session id, per-turn request id, per-request
 message id).
@@ -140,7 +140,7 @@ for want in ("workbuddy", "vscode", "cli"):
         check("%s: message id is independent" % want,
               h.get("X-Conversation-Message-ID") != h.get("X-Request-ID"))
     else:
-        # 桌面端按 5.8.4 抓包、CLI 按 2.168.2 契约：Request-ID = Message-ID。
+        # 桌面端按 5.8.4 抓包、CLI 按 2.174.0 实测：Request-ID = Message-ID。
         check("%s: message id equals request id" % want,
               h.get("X-Conversation-Message-ID") == h.get("X-Request-ID"))
     conv = str(h.get("X-Conversation-ID"))
@@ -244,28 +244,29 @@ check("the trace family is present",
 check("traceparent follows the W3C shape",
       str(d.get("traceparent", "")).startswith("00-")
       and str(d.get("traceparent", "")).endswith("-01"), d.get("traceparent"))
-check("the desktop trace keeps its old shape (no parent span, b3 in three parts)",
-      "X-B3-ParentSpanId" not in d and len(str(d.get("b3", "")).split("-")) == 3,
+check("the desktop main trace carries the parent span (2026-10-24, cap:727)",
+      "X-B3-ParentSpanId" in d and len(str(d.get("b3", "")).split("-")) == 4
+      and d.get("b3", "").endswith("-" + str(d.get("X-B3-ParentSpanId"))),
       (d.get("X-B3-ParentSpanId"), d.get("b3")))
 check("the CN desktop keeps its own version and UA",
       wb_identity.build_identity_headers("workbuddy", "cn", "u1", "tok")["X-IDE-Version"]
       == "5.8.3")
 
 print()
-print("[6b] the CLI identity matches the official CodeBuddy CLI 2.168.2")
-# 取值来源：官方 npm 包 @tencent-ai/codebuddy-code 2.168.2 解包（product.json 的
-# 产品常量 + dist 里的 header 常量 / buildUserAgent / 请求头组装 / 请求体处理器）。
+print("[6b] the CLI identity matches the official CodeBuddy CLI 2.174.0")
+# 取值来源：官方 npm 包 @tencent-ai/codebuddy-code 解包 + 2.174.0 独立 CLI
+# wire 实测（capture/cli.jsonl，2026-10-24）。
 _pin_env = {"WB_IDENTITY_OS": "Windows", "WB_IDENTITY_ARCH": "x64",
             "WB_IDENTITY_NODE_VERSION": "v22.21.1"}
 _saved_env = {k: os.environ.get(k) for k in _pin_env}
 os.environ.update(_pin_env)
 cli = wb_identity.build_identity_headers("cli", "intl", "u1", "tok")
 check("the CLI UA is buildUserAgent's two segments (adapter drops the SDK UA)",
-      cli.get("User-Agent") == "CLI/2.168.2 CodeBuddy/2.168.2",
+      cli.get("User-Agent") == "CLI/2.174.0 CodeBuddy/2.174.0",
       cli.get("User-Agent"))
 check("the CLI X-IDE-* triple",
       (cli.get("X-IDE-Type"), cli.get("X-IDE-Name"), cli.get("X-IDE-Version"))
-      == ("CLI", "CLI", "2.168.2"),
+      == ("CLI", "CLI", "2.174.0"),
       (cli.get("X-IDE-Type"), cli.get("X-IDE-Name"), cli.get("X-IDE-Version")))
 check("the CLI X-Product is SaaS", cli.get("X-Product") == "SaaS",
       cli.get("X-Product"))
@@ -290,8 +291,8 @@ stainless = {
     "x-stainless-runtime": "node",
     "x-stainless-runtime-version": "v22.21.1",
     "x-stainless-retry-count": "0",
-    "x-stainless-timeout": "1200",
 }
+# x-stainless-timeout 官方不设（2.174.0 实测无此头）。
 check("the CLI carries the OpenAI SDK's x-stainless-* family",
       all(cli.get(k) == v for k, v in stainless.items()),
       [(k, cli.get(k)) for k, v in stainless.items() if cli.get(k) != v])
@@ -331,7 +332,7 @@ check("the CLI sends none of the headers the official CLI does not send",
                   "X-Device-Token", "X-Parent-Conversation-ID")) & set(cli)))
 check("the CN CLI carries the same official version",
       wb_identity.build_identity_headers("cli", "cn", "u1", "tok")["X-IDE-Version"]
-      == "2.168.2")
+      == "2.174.0")
 check("the official chat body encoding is gzip",
       wb_identity.REQUEST_CONTENT_ENCODING == "gzip"
       and wb_identity.gzip_body(b'{"a":1}')[:2] == b"\x1f\x8b")
@@ -346,7 +347,7 @@ cli_acc = A.Account(credential("cli"))
 cli_chat = cli_acc.headers(purpose="chat", session_key="sess-9")
 check("the CLI chat headers carry the official agent / trace family",
       (cli_chat.get("X-Agent-Runtime"), cli_chat.get("X-Agent-Purpose"),
-       cli_chat.get("X-IDE-Version")) == ("other", "conversation", "2.168.2")
+       cli_chat.get("X-IDE-Version")) == ("other", "conversation", "2.174.0")
       and bool(cli_chat.get("X-B3-ParentSpanId")),
       (cli_chat.get("X-Agent-Runtime"), cli_chat.get("X-IDE-Version"),
        cli_chat.get("X-B3-ParentSpanId")))
@@ -357,10 +358,19 @@ check("the CLI chat headers drop the four browser-only headers",
       (cli_chat.get("Accept"), sorted(set(("Origin", "Referer",
                                           "X-CodeBuddy-Request",
                                           "Accept-Language")) & set(cli_chat))))
-check("the desktop chat headers keep their browser headers (unchanged)",
-      chat.get("Accept") == "application/json, text/plain, */*"
-      and all(k in chat for k in ("Origin", "Referer",
-                                  "X-CodeBuddy-Request", "Accept-Language")))
+check("the desktop chat headers match the measured wire (2026-10-24, cap:727)",
+      chat.get("Accept") == "application/json"
+      and chat.get("X-Requested-With") == "XMLHttpRequest"
+      and chat.get("x-codebuddy-request") == "1"
+      and not any(k in chat for k in ("Origin", "Referer",
+                                      "X-CodeBuddy-Request", "Accept-Language"))
+      and chat.get("x-stainless-runtime") == "node"
+      and "x-stainless-timeout" not in chat
+      and "acp-connection-id" in chat
+      and bool(chat.get("X-B3-ParentSpanId")),
+      (chat.get("Accept"), sorted(set(("Origin", "Referer",
+                                       "X-CodeBuddy-Request",
+                                       "Accept-Language")) & set(chat))))
 check("the CLI chat headers carry no feedback-only ids",
       "X-Machine-ID" not in cli_chat and "X-Session-ID" not in cli_chat)
 check("the CLI chat headers follow the account's session key",
@@ -401,9 +411,21 @@ check("the session id is not the machine id",
 check("the request id is 32 hex chars",
       len(wb_fingerprint.generate_request_id("u1")) == 32)
 
-# 计费路径同样按账号隔离：两个账号的 X-Session-ID 不能相同。
-sess_acc_a = A.Account(credential("workbuddy"))
-sess_acc_b = A.Account(credential("workbuddy"))
+# 国际版计费实测（2026-10-24，cap:714/715/718）是 axios 1.16.1 形态：不带
+# X-Machine-ID / X-Session-ID / Origin / Referer / X-Requested-With /
+# X-CodeBuddy-Request（那些是 hub 自加的）。国内版无实测维持原样，「每账号
+# 隔离」的属性改用 cn 账号钉住。
+intl_bill = conv_acc.headers(purpose="billing")
+check("the intl billing headers follow the measured axios shape",
+      intl_bill.get("User-Agent") == "axios/1.16.1"
+      and intl_bill.get("Accept") == "application/json"
+      and not any(k in intl_bill for k in ("X-Machine-ID", "X-Session-ID",
+                                           "Origin", "Referer",
+                                           "X-Requested-With",
+                                           "X-CodeBuddy-Request")),
+      (intl_bill.get("User-Agent"), intl_bill.get("Accept")))
+sess_acc_a = A.Account(credential("workbuddy", realm="cn", domain="www.workbuddy.cn"))
+sess_acc_b = A.Account(credential("workbuddy", realm="cn", domain="www.workbuddy.cn"))
 sess_acc_b.uid = sess_acc_a.uid + "-other"
 check("the billing session id is per account",
       sess_acc_a.headers(purpose="billing").get("X-Session-ID")

@@ -379,6 +379,17 @@ RESOURCE_FREE_PACKAGES_PATH = "/billing/meter/get-user-resource-free-packages"
 RESOURCE_PAID_PACKAGES_PATH = "/billing/meter/get-user-resource-paid-packages"
 CHECKIN_STATUS_PATH = "/v2/billing/meter/checkin-activity-status"
 ENTERPRISE_USAGE_PATH = "/billing/meter/get-enterprise-user-usage"
+#: 桌面身份云端会话（/console/as/conversations）创建失败的冷却：拿不到云端
+#: UUID 就回落本地派生会话 id，TTL 内不重试（见 Account.cloud_conversation）。
+CLOUD_CONV_FAIL_TTL = 600.0
+#: 会话标题：官方 create 的 name 就是首条用户消息截断（cap:686），之后由
+#: 辅助模型生成 3-7 词再 PATCH（cap:723/724）；网关不发辅助模型请求，全程
+#: 用首条消息前 20 字，形态与官方 create 一致。
+CLOUD_CONV_TITLE_MAX = 20
+
+
+def _conversation_title(text):
+    return re.sub(r"\s+", " ", str(text or "").strip())[:CLOUD_CONV_TITLE_MAX]
 #: 静态 API Key 上企业用量走 /v2 前缀（实测）：不带 /v2 的同一路径被 APISIX
 #: 直接回 401 的 HTML 页，带 /v2 才进业务层。OAuth 账号维持原路径不动——
 #: 那一条已经在生产跑着，没有理由陪着改。
@@ -1110,6 +1121,12 @@ class Account(object):
         # The dashboard snapshots this state while request threads update it.
         # Keep it separate from _refresh_lock, which spans network requests.
         self._throttle_lock = threading.Lock()
+        # 桌面身份的云端会话生命周期（2026-10-24 实测对齐，见
+        # cloud_conversation）：(session_key -> {id, created_ms, title_set,
+        # retry_after})。create 是网络调用，锁跨网络持有——每账号每会话只
+        # 发生一次，串行化可接受。
+        self._cloud_conv_lock = threading.Lock()
+        self._cloud_convs = {}
 
     def to_dict(self):
         """Full view of the account, including live state.
@@ -1797,22 +1814,41 @@ class Account(object):
         cfg = get_realm_config(self.realm)
 
         if purpose != "chat":
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/plain, */*",
-                "X-Requested-With": "XMLHttpRequest",
-                "User-Agent": cfg["billing_ua"],
-                "Origin": cfg["origin"],
-                "Referer": cfg["origin"] + "/",
-                "Authorization": "Bearer " + self.access_token,
-                "X-User-Id": self.uid,
-                "X-Domain": self.domain or cfg["domain"],
-                "X-CodeBuddy-Request": "1",
-                "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
-                "X-Request-ID": generate_request_id(self.uid),
-                "X-Machine-ID": derive_id(self.uid, "machine"),
-                "X-Session-ID": session_id(self.uid),
-            }
+            if self.realm == "cn":
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/plain, */*",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "User-Agent": cfg["billing_ua"],
+                    "Origin": cfg["origin"],
+                    "Referer": cfg["origin"] + "/",
+                    "Authorization": "Bearer " + self.access_token,
+                    "X-User-Id": self.uid,
+                    "X-Domain": self.domain or cfg["domain"],
+                    "X-CodeBuddy-Request": "1",
+                    "Accept-Language": "zh-CN",
+                    "X-Request-ID": generate_request_id(self.uid),
+                    "X-Machine-ID": derive_id(self.uid, "machine"),
+                    "X-Session-ID": session_id(self.uid),
+                }
+            else:
+                # 2026-10-24 实测（capture/lifecycle.jsonl:714/715/718，
+                # www.workbuddy.ai /billing/meter/*）：国际版 billing 由客户端
+                # 内置的 axios 1.16.1 发出——UA 就是 axios/<ver>、Accept 是
+                # application/json，不带 X-Machine-ID / X-Session-ID / Origin /
+                # Referer / X-Requested-With / X-CodeBuddy-Request / X-Product。
+                # Accept-Language 跟应用界面语言走（唯一实测样本是中文界面的
+                # zh）；网关无界面，取同族短码 en。国内版无实测，维持上面原样。
+                headers = {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + self.access_token,
+                    "X-User-Id": self.uid,
+                    "X-Domain": self.domain or cfg["domain"],
+                    "Accept-Language": "en",
+                    "X-Request-ID": generate_request_id(self.uid),
+                    "User-Agent": "axios/1.16.1",
+                }
             # 静态 API Key：与 chat 链路口径一致，两个鉴权头都发。计费端点
             # 本身任一个都认，但统一形态省得两条路径各写一套。
             if self.is_api_key:
@@ -1820,7 +1856,7 @@ class Account(object):
             if self.enterprise_id:
                 headers["X-Enterprise-Id"] = self.enterprise_id
                 headers["X-Tenant-Id"] = self.enterprise_id
-            else:
+            elif self.realm == "cn":
                 headers["X-No-Enterprise-Id"] = "1"
             if self.realm == "cn":
                 headers["X-Product"] = "SaaS"
@@ -1845,13 +1881,29 @@ class Account(object):
                 os.path.dirname(self.path)) if self.path else "auto"),
         )
         if self.is_cli_identity():
-            # 官方 CLI 的 chat 请求由 OpenAI Node SDK 发出：浏览器头一个都没有
-            # （X-Requested-With 也没有），Accept 就是 application/json。
+            # 官方 CLI 的 chat 请求由 OpenAI Node SDK 发出：无 Origin / Referer /
+            # Accept-Language（x-requested-with 与 x-codebuddy-request 由
+            # wb_identity 的 CLI 分支按 2.174.0 实测补上），Accept 就是
+            # application/json。
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
+        elif self.product == wb_identity.PRODUCT_DESKTOP:
+            # 2026-10-24 桌面主对话实测（capture/lifecycle.jsonl:727）：发送方
+            # 是 OpenAI Node SDK——没有 Origin / Referer / Accept-Language（那
+            # 套浏览器头属于内嵌 web 聊天链路，cap:650/740）；Accept 就是
+            # application/json；X-Requested-With 保留；x-codebuddy-request 是
+            # 官方 withSecurityHeader 的全小写形态。stainless / acp-connection-id
+            # / gzip 由 wb_identity 桌面分支与 open_upstream 补。
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+                "x-codebuddy-request": "1",
+            }
         else:
+            # VSCode：只有扩展解包源码证据、无 wire 实测，维持原形态。
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/plain, */*",
@@ -1929,6 +1981,43 @@ class Account(object):
         with self._refresh_lock:
             return self._refresh_locked()
 
+    def _refresh_headers(self):
+        """token 刷新的出站头。抽出来是为了能被测试直接钉住形态。"""
+        cfg = get_realm_config(self.realm)
+        if self.realm == "cn":
+            return {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "X-Requested-With": "XMLHttpRequest",
+                "User-Agent": cfg["billing_ua"],
+                "Origin": cfg["origin"],
+                "Referer": cfg["origin"] + "/",
+                "X-Refresh-Token": self.refresh_token,
+                "X-Auth-Refresh-Source": "workbuddy",
+                "X-User-Id": self.uid,
+                "X-Domain": self.domain or cfg["domain"],
+                "X-CodeBuddy-Request": "1",
+                "Accept-Language": "zh-CN",
+            }
+        # 2026-10-24 实测（capture/lifecycle.jsonl:711，对话期间桌面主组件
+        # 触发的 refresh）：15 头——无 Origin / Referer / X-CodeBuddy-Request /
+        # Accept-Language，UA 是三段式 chat_ua（不是单段 billing_ua），带
+        # X-Requested-With / X-Request-ID / X-Product。国内版无实测，维持
+        # 上面原样。
+        return {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-Domain": self.domain or cfg["domain"],
+            "X-Refresh-Token": self.refresh_token,
+            "X-Auth-Refresh-Source": "plugin",
+            "X-Request-ID": generate_request_id(self.uid),
+            "X-Product": "SaaS",
+            "User-Agent": cfg["chat_ua"],
+            "Authorization": "Bearer " + self.access_token,
+            "X-User-Id": self.uid,
+        }
+
     def _refresh_locked(self):
         if self.is_api_key:
             # 静态 Key 无法 refresh（refresh 端点只认 OAuth 设备流）。返回
@@ -1941,20 +2030,7 @@ class Account(object):
             return False
         cfg = get_realm_config(self.realm)
         url = cfg["chat_upstream"] + REFRESH_PATH
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/plain, */*",
-            "X-Requested-With": "XMLHttpRequest",
-            "User-Agent": cfg["billing_ua"],
-            "Origin": cfg["origin"],
-            "Referer": cfg["origin"] + "/",
-            "X-Refresh-Token": self.refresh_token,
-            "X-Auth-Refresh-Source": "workbuddy" if self.realm == "cn" else "plugin",
-            "X-User-Id": self.uid,
-            "X-Domain": self.domain or cfg["domain"],
-            "X-CodeBuddy-Request": "1",
-            "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
-        }
+        headers = self._refresh_headers()
         if self.enterprise_id:
             headers["X-Enterprise-Id"] = self.enterprise_id
         try:
@@ -2544,6 +2620,153 @@ class Account(object):
                           "retryable": False, "limit": False}
         return conversation, None
 
+    # -----------------------------------------------------------------
+    # 桌面身份的云端会话生命周期（2026-10-24 实测对齐，cap:686-736）
+    # -----------------------------------------------------------------
+
+    def _desktop_console_headers(self):
+        """/console/as/* 的桌面主组件头（cap:686/692/724/736：10 头形态，
+        无浏览器头，UA 是 desktop_console_ua 双段式，X-Request-ID 32hex）。"""
+        cfg = get_realm_config(self.realm)
+        return {
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "User-Agent": wb_identity.desktop_console_ua(self.realm),
+            "X-Request-ID": generate_request_id(self.uid),
+            "X-Product": "SaaS",
+            "Authorization": "Bearer " + self.access_token,
+            "X-User-Id": self.uid,
+            "X-Domain": self.domain or cfg["domain"],
+        }
+
+    def _cloud_workdir(self, now_ms):
+        """workDir：官方是本地每会话工作目录（C:/Users/<用户>/WorkBuddy AI/
+        <本地时间戳>，cap:686）。网关按账号昵称拼一个同形态目录，不让全部
+        账号共用同一个用户名。"""
+        user = re.sub(r"[^A-Za-z0-9_-]+", "",
+                      str(self.nickname or "").strip()) or "user"
+        stamp = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime(now_ms / 1000.0))
+        return "C:/Users/%s/WorkBuddy AI/%s" % (user, stamp)
+
+    def _cloud_conversation_create(self, session_key, first_text):
+        """POST /console/as/conversations/v2（cap:686 形态）。回传 (uuid, created_ms)。"""
+        cfg = get_realm_config(self.realm)
+        now_ms = int(time.time() * 1000)
+        body = {
+            "type": "local",
+            "sessionId": wb_identity.conversation_id_for(self.uid, session_key),
+            "name": _conversation_title(first_text),
+            "conversationOrigin": "legacy_workbuddy_local",
+            "workDir": self._cloud_workdir(now_ms),
+            "isPlayground": 1,
+            "createdAtMs": now_ms,
+            "updatedAtMs": now_ms,
+            "lastActivityAtMs": now_ms,
+            "clientContext": {
+                "localStatus": "active",
+                # hostId 是机器级 UUID：全局共用一个就成了跨账号关联键，
+                # 按账号派生（与 billing machine id 同一隔离口径）。
+                "hostId": derive_id(self.uid, "host"),
+                "sessionKind": "manual",
+                "model": "",
+                "sourceMode": "",
+                "permissionMode": "",
+                "expert": {"id": "", "locale": "", "runtimeIdentity": "",
+                           "marketplace": ""},
+            },
+        }
+        url = cfg["chat_upstream"] + "/console/as/conversations/v2"
+        req = urllib.request.Request(
+            url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers=self._desktop_console_headers(), method="POST")
+        try:
+            with urlopen(req, timeout=10, proxy=self.proxy) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        except Exception:
+            return "", 0
+        conversation = None
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict):
+                conversation = data.get("id")
+        if payload.get("code") not in (0, None) or not conversation:
+            return "", 0
+        # 创建后紧跟的 isPlayground PATCH（cap:692），best-effort。
+        self._cloud_conversation_patch(str(conversation),
+                                       {"isPlayground": 1, "updatedAtMs": now_ms})
+        return str(conversation), now_ms
+
+    def _cloud_conversation_patch(self, conversation, fields):
+        """POST /console/as/conversations/{uuid}（增量字段，cap:692/701/724/731）。"""
+        cfg = get_realm_config(self.realm)
+        url = (cfg["chat_upstream"] + "/console/as/conversations/"
+               + urllib.parse.quote(str(conversation)))
+        req = urllib.request.Request(
+            url, data=json.dumps(fields, ensure_ascii=False).encode("utf-8"),
+            headers=self._desktop_console_headers(), method="POST")
+        try:
+            with urlopen(req, timeout=10, proxy=self.proxy) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        except Exception:
+            return False
+        return isinstance(payload, dict) and payload.get("code") in (0, None)
+
+    def cloud_conversation(self, session_key, first_text=""):
+        """确保 (session_key) 对应的云端会话存在；回传云端 UUID（'' = 拿不到）。
+
+        桌面身份专用：官方每轮对话先在 /console/as 落库、把返回的云端 UUID
+        当 X-Conversation-ID 发 chat（cap:686→727）。失败按 TTL 冷却，不会
+        每轮都撞同一个失败端点；拿不到时调用方回落本地派生 id。
+        """
+        if (self.product != wb_identity.PRODUCT_DESKTOP
+                or not str(session_key or "").strip()):
+            return ""
+        directory = getattr(self, "accounts_dir", "")
+        if not directory and self.path:
+            directory = os.path.dirname(self.path)
+        if directory and not wb_settings.cloud_conversations_enabled(directory):
+            return ""
+        key = str(session_key).strip()
+        now = time.time()
+        with self._cloud_conv_lock:
+            rec = self._cloud_convs.get(key)
+            if rec and (rec.get("id") or now < rec.get("retry_after", 0)):
+                return rec.get("id") or ""
+            conv_id, created_ms = self._cloud_conversation_create(key, first_text)
+            self._cloud_convs[key] = {
+                "id": conv_id,
+                "created_ms": created_ms,
+                "title_set": False,
+                "retry_after": 0 if conv_id else now + CLOUD_CONV_FAIL_TTL,
+            }
+            return conv_id
+
+    def touch_cloud_conversation(self, session_key, title=None):
+        """每轮对话的伴随 PATCH（best-effort，失败静默）。
+
+        官方节奏（cap:701/724/731）：updatedAtMs 冻结在创建时刻，
+        lastActivityAtMs 随轮次前移；title 单独 PATCH。首轮（title 未设）发
+        title，之后发 activity。
+        """
+        key = str(session_key or "").strip()
+        if not key:
+            return
+        with self._cloud_conv_lock:
+            rec = self._cloud_convs.get(key)
+            if not rec or not rec.get("id"):
+                return
+            send_title = bool(title) and not rec.get("title_set")
+            if send_title:
+                rec["title_set"] = True
+        if send_title:
+            self._cloud_conversation_patch(
+                rec["id"], {"title": _conversation_title(title),
+                            "updatedAtMs": rec["created_ms"]})
+        else:
+            self._cloud_conversation_patch(
+                rec["id"], {"lastActivityAtMs": int(time.time() * 1000),
+                            "updatedAtMs": rec["created_ms"]})
+
     def daily_chat(self, web=None, trigger="unknown"):
         """国际版每日活跃对话（官方每日活跃 30/50 积分）。
 
@@ -2580,17 +2803,19 @@ class Account(object):
             "reasoning_effort": "none",
         }
         req_body = wb_proxy.build_upstream_body(body)
-        # 官方 CLI 的 chat 请求体：gzip + cache_retention（紧凑 JSON 由传输层统一
-        # 处理，本 PR 不重复实现）；桌面端 / VSCode 维持原请求体（VSCode 的
-        # RequestBodyGzip 有 feature 开关、主 chat 是否压仍待抓包确认）。
-        cli_identity = self.is_cli_identity()
-        if cli_identity:
+        # 官方三身份的 chat body 都是 gzip：CLI（RequestBodyGzip + 注入
+        # cache_retention）、VSCode（RequestBodyGzip）、桌面端（2026-10-24 实测
+        # cap:727：Content-Encoding: gzip，160490→55912；解包为
+        # productFeatures.RequestBodyGzip 服务端开关，当前对实测账号开启）。
+        # cache_retention / 字段剔除是 CLI 专属，桌面端 2.161.0 没有这套逻辑。
+        if self.is_cli_identity():
             req_body = {k: v for k, v in req_body.items()
                         if k not in wb_identity.CLI_BODY_DROP_FIELDS}
             req_body["cache_retention"] = wb_identity.CLI_CACHE_RETENTION
+        if wb_identity.product_feature("RequestBodyGzip"):
             headers["Content-Encoding"] = wb_identity.REQUEST_CONTENT_ENCODING
         data = json.dumps(req_body, ensure_ascii=False).encode("utf-8")
-        if cli_identity:
+        if wb_identity.product_feature("RequestBodyGzip"):
             data = wb_identity.gzip_body(data)
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
         # 与 open_upstream 的 chat 路径同口径：头名原样上线（Request.add_header 会

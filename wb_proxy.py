@@ -11095,15 +11095,20 @@ def remote_config_headers(account, realm, ua=None):
     The UA decides which catalogue comes back and only the desktop UA returns
     the full list (an unknown one is a hard 400, code 12403), so this uses a
     realm's fixed desktop UA rather than the account's current identity.
+    2026-10-24 实测（cap:716）：无 Origin / Referer，带 X-Requested-With /
+    X-Request-ID / X-Product / X-Domain / Connection: close。
     """
     cfg = wb_accounts.get_realm_config(realm)
     headers = {
         "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest",
+        "Connection": "close",
+        "X-Request-ID": wb_accounts.generate_request_id(account.uid),
+        "X-Product": "SaaS",
         "User-Agent": ua or cfg["chat_ua"],
-        "Origin": cfg["origin"],
-        "Referer": cfg["origin"] + "/",
         "Authorization": "Bearer " + account.access_token,
         "X-User-Id": account.uid,
+        "X-Domain": getattr(account, "domain", "") or cfg["domain"],
     }
     # 静态 API Key 必须额外带 X-API-Key：只发 Authorization 时上游下发 54 条
     # 而不是 56 条，且 HTTP 仍是 200、没有任何提示（实测）。少的四条正是
@@ -11285,6 +11290,16 @@ def fetch_remote_product_config(realm):
             # scheduler and /v1/models use to keep free accounts off models
             # the upstream would answer 11158 for.
             wb_tiers.ingest(realm, payload)
+            # 云控开关跟上游走（productFeatures.RequestBodyGzip 决定 chat body
+            # 是否 gzip；官方 product.json 静态默认 true，可被服务端覆盖）。
+            # 响应里没有这一节时维持当前值（默认开，2026-10-24 实测状态）。
+            if isinstance(payload, dict):
+                features = payload.get("productFeatures")
+                if not isinstance(features, dict):
+                    data = payload.get("data")
+                    features = data.get("productFeatures") if isinstance(data, dict) else None
+                if features is not None:
+                    wb_identity.set_product_features(features)
             # 成功副本落盘留档（catalog/，纯存档；见 persist_remote_catalog）。
             persist_remote_catalog(realm, payload)
             return parsed
@@ -14344,6 +14359,50 @@ def _free_model_credit_fallback_enabled():
         "1", "true", "yes", "on")
 
 
+def _first_user_text(body):
+    """body 里第一条用户消息的文本（云端会话的 name/title 用，cap:686/724）。"""
+    for message in ((body or {}).get("messages") or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = [str(part.get("text") or "") for part in content
+                     if isinstance(part, dict)]
+            return " ".join(p for p in parts if p)
+    return ""
+
+
+def _desktop_conv_lifecycle(account, session_key, upstream_body):
+    """桌面身份的会话 id 选择：云端 UUID 优先、拿不到回落本地派生。
+
+    回传 (conv_id, touch)。touch 非 None 时，请求成功后应以后台线程调用
+    account.touch_cloud_conversation(*touch)。VSCode / CLI 由调用方另行处理，
+    不进这里。
+    """
+    conv_id = wb_identity.conversation_id_for(account.uid, session_key)
+    touch = None
+    if account.product == wb_identity.PRODUCT_DESKTOP:
+        try:
+            cloud_id = account.cloud_conversation(
+                session_key, _first_user_text(upstream_body))
+        except Exception:
+            cloud_id = ""
+        if cloud_id:
+            conv_id = cloud_id
+            touch = (session_key, _first_user_text(upstream_body))
+    return conv_id, touch
+
+
+def _bg_cloud_conv_touch(account, session_key, title):
+    """对话成功后的伴随 PATCH（title/activity）——后台线程，失败静默。"""
+    try:
+        account.touch_cloud_conversation(session_key, title=title)
+    except Exception:
+        pass
+
+
 def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None,
                   allow_credit_fallback=True, allow_product_switch=True,
                   pin_account=None, defer_egress_success=False,
@@ -14596,8 +14655,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         # 带 Content-Encoding: gzip）+ 注入 cache_retention=long；Responses API
         # 的字段 / 客户端 metadata 不带。VSCode 官方主 chat 也默认 gzip
         # （RequestBodyGzip=true → executeByMode → createCustomFetch 压缩）。
+        # 桌面端同 gzip：2026-10-24 实测（capture/lifecycle.jsonl:727，
+        # 160490→55912）；解包里它是 productFeatures.RequestBodyGzip 服务端
+        # 开关，当前对实测账号开启。cache_retention / 字段剔除仍为 CLI 专属
+        # （桌面端内置 2.161.0 无这套逻辑，dist 里 0 处 cache_retention）。
         cli_identity = account.is_cli_identity()
-        vscode_identity = account.product == wb_identity.PRODUCT_VSCODE
         if cli_identity:
             attempt_body = {k: v for k, v in attempt_body.items()
                             if k not in wb_identity.CLI_BODY_DROP_FIELDS}
@@ -14606,7 +14668,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         # json.dumps(separators=(", ", ": ")) 会让 body 字节与 Content-Length 都成
         # 一处机器特征。上游解析等价，只影响线上字节。
         attempt_data = encode_upstream_body(attempt_body)
-        if cli_identity or vscode_identity:
+        if wb_identity.product_feature("RequestBodyGzip"):
             attempt_data = wb_identity.gzip_body(attempt_data)
         # 会话头族（X-Conversation-ID / -Request-ID）的语义见 wb_identity：桌面端
         # 官方客户端同一会话复用同一个 id：桌面端 / CLI 按 (账号, 会话键) 稳定
@@ -14615,17 +14677,22 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         # 缺了这套头上游的渠道校验会回 400 / code 11-128（conversation id
         # missing）。跨账号重试时按账号各自派生，不会把两个号串到同一个会话上。
         # 重试换号时 session_key / turn_request_id / vscode_conversation_id 都不变。
+        cloud_conv_touch = None
         if account.product == wb_identity.PRODUCT_VSCODE:
             conv_id = vscode_conversation_id
         elif session_key:
-            conv_id = wb_identity.conversation_id_for(account.uid, session_key)
+            # 桌面身份：先在 /console/as 落库拿云端 UUID 当会话 id（官方
+            # cap:686→727 的顺序），上游侧就能交叉核验到会话记录；拿不到
+            # （网络失败/风控拦/设置关闭）回落本地派生 id，失败按 TTL 冷却。
+            conv_id, cloud_conv_touch = _desktop_conv_lifecycle(
+                account, session_key, upstream_body)
         else:
             conv_id = None
         req_headers = account.headers(
             purpose="chat", session_key=session_key,
             turn_request_id=turn_request_id, model=model,
             conversation_id=conv_id)
-        if cli_identity or vscode_identity:
+        if wb_identity.product_feature("RequestBodyGzip"):
             req_headers["Content-Encoding"] = wb_identity.REQUEST_CONTENT_ENCODING
         req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
                                      headers=req_headers)
@@ -14648,6 +14715,12 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             # 标记置空，循环开头就不会再重复归还。
             bind_account_slot_to_response(resp, account)
             slot_held = None
+            if cloud_conv_touch:
+                # 伴随 PATCH（title/activity，cap:701/724/731）不挡响应：
+                # 官方也是异步发的，这里后台线程 best-effort。
+                threading.Thread(
+                    target=_bg_cloud_conv_touch, args=(account,) + cloud_conv_touch,
+                    daemon=True, name="wb-cloud-conv-touch").start()
             # The third element is the reasoning effort this request ran at: the
             # body is rebuilt per attempt, but the effort is a property of the
             # model and the request, and the callers record it on the usage row.
@@ -15198,18 +15271,17 @@ def probe_account(account, model=None, timeout=30):
                  "stream": False}
     probe_body = build_upstream_body(test_body)
     cli_identity = account.is_cli_identity()
-    vscode_identity = account.product == wb_identity.PRODUCT_VSCODE
     if cli_identity:
         probe_body = {k: v for k, v in probe_body.items()
                       if k not in wb_identity.CLI_BODY_DROP_FIELDS}
         probe_body["cache_retention"] = wb_identity.CLI_CACHE_RETENTION
     body = encode_upstream_body(probe_body)
-    if cli_identity or vscode_identity:
+    if wb_identity.product_feature("RequestBodyGzip"):
         body = wb_identity.gzip_body(body)
     # 与 open_upstream 同一条出站形态：VSCode 身分的 model 请求带 X-Model-ID；
-    # CLI / VSCode 官方主 chat 都默认 gzip。
+    # 三身份 chat body 都 gzip（桌面端 2026-10-24 实测，见 open_upstream 注）。
     probe_headers = account.headers(purpose="chat", model=model)
-    if cli_identity or vscode_identity:
+    if wb_identity.product_feature("RequestBodyGzip"):
         probe_headers["Content-Encoding"] = wb_identity.REQUEST_CONTENT_ENCODING
     req = urllib.request.Request(chat_url, data=body, method="POST",
                                  headers=probe_headers)

@@ -44,6 +44,9 @@ os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_accounts
+# 本套件聚焦重试/轮换逻辑：关掉桌面云端会话生命周期（默认开，
+# wb_settings.cloud_conversations_enabled），免得 create 多吃 mock 队列。
+wb_accounts.Account.cloud_conversation = lambda self, session_key, first_text="": ""
 import wb_proxy as P
 
 
@@ -360,19 +363,22 @@ class IdentityOnRetryTests(unittest.TestCase):
                             second["x-conversation-id"])
         # 官方 CLI 2.168.2 的身份头（含 OpenAI Node SDK 6.25.0 的指纹头）。
         self.assertEqual(first["user-agent"],
-                         "CLI/2.168.2 CodeBuddy/2.168.2")
-        self.assertEqual(first["x-ide-version"], "2.168.2")
+                         "CLI/2.174.0 CodeBuddy/2.174.0")
+        self.assertEqual(first["x-ide-version"], "2.174.0")
         self.assertEqual(first["x-agent-runtime"], "other")
         self.assertEqual(first["x-private-data"], "false")
         self.assertEqual(first["x-stainless-lang"], "js")
         self.assertEqual(first["x-stainless-package-version"], "6.25.0")
         self.assertEqual(first["x-stainless-runtime-version"], "v22.21.1")
         self.assertTrue(first["x-b3-parentspanid"])
-        # 官方 CLI 的 chat 没有浏览器头，Accept 就是 application/json。
+        # 官方 CLI 的 chat 无 Origin / Referer / Accept-Language / 设备 token，
+        # Accept 就是 application/json；2.174.0 实测它带全小写的
+        # x-requested-with 与 x-codebuddy-request（capture/cli.jsonl）。
         self.assertEqual(first["accept"], "application/json")
-        for gone in ("origin", "referer", "x-codebuddy-request",
-                     "accept-language", "x-device-token", "x-requested-with"):
+        for gone in ("origin", "referer", "accept-language", "x-device-token"):
             self.assertNotIn(gone, first)
+        self.assertEqual(first.get("x-requested-with"), "XMLHttpRequest")
+        self.assertEqual(first.get("x-codebuddy-request"), "1")
         # 请求体：gzip + cache_retention=long，不带 metadata。
         # （紧凑 JSON 由 transport PR #429 统一钉，本 PR 不重复实现。）
         self.assertEqual(first["content-encoding"], "gzip")
@@ -393,17 +399,19 @@ class IdentityOnRetryTests(unittest.TestCase):
         # 桌面端仍是每请求现生成会话 request id（本 PR 不改它的行为）。
         self.assertNotEqual(first["x-conversation-request-id"],
                             second["x-conversation-request-id"])
-        self.assertNotIn("x-b3-parentspanid", first)
+        # main 请求带父 span + b3 四段（2026-10-24 实测 cap:727）。
+        self.assertIn("x-b3-parentspanid", first)
         self.assertEqual(first["user-agent"],
                          "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0")
-        # 桌面端的请求体与浏览器头都保持原样（不 gzip）。
-        self.assertNotIn("content-encoding", first)
-        self.assertNotEqual(upstream.calls[0].data[:2], b"\x1f\x8b")
-        self.assertEqual(first["accept"], "application/json, text/plain, */*")
-        self.assertIn("origin", first)
-        self.assertIn("referer", first)
-        self.assertIn("x-codebuddy-request", first)
-        self.assertIn("accept-language", first)
+        # 桌面端 chat 也 gzip（cap:727 实测，productFeatures.RequestBodyGzip
+        # 服务端开关当前开启），浏览器头族按实测移除、x-codebuddy-request 小写。
+        self.assertEqual(first["content-encoding"], "gzip")
+        self.assertEqual(upstream.calls[0].data[:2], b"\x1f\x8b")
+        self.assertEqual(first["accept"], "application/json")
+        self.assertNotIn("origin", first)
+        self.assertNotIn("referer", first)
+        self.assertEqual(first.get("x-codebuddy-request"), "1")
+        self.assertNotIn("accept-language", first)
 class RestrictionPersistenceTests(unittest.TestCase):
     """限制期限是账号状态：落盘、重启/清冷却/测试都不能把它放回池子。"""
 

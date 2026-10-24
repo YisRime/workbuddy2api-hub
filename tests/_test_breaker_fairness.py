@@ -32,6 +32,9 @@ from _isolated_dirs import isolated_data_dirs    # noqa: E402
 _TMP = isolated_data_dirs("wb-breaker-fair-")
 
 import wb_accounts as A        # noqa: E402
+# 本套件聚焦重试/轮换逻辑：关掉桌面云端会话生命周期（默认开，
+# wb_settings.cloud_conversations_enabled），免得 create 多吃 mock 队列。
+A.Account.cloud_conversation = lambda self, session_key, first_text="": ""
 import wb_proxy as P           # noqa: E402
 
 

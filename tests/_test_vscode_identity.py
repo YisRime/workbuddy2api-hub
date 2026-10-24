@@ -358,15 +358,16 @@ check("desktop UA stays the 5.8.4 capture",
       d.get("User-Agent"))
 check("desktop keeps Request-ID = Message-ID",
       d.get("X-Request-ID") == d.get("X-Conversation-Message-ID"))
-check("desktop keeps its traceparent and three-segment b3",
+check("desktop keeps its traceparent and four-segment b3 (cap:727)",
       str(d.get("traceparent", "")).startswith("00-")
-      and len(str(d.get("b3", "")).split("-")) == 3, d.get("b3"))
+      and len(str(d.get("b3", "")).split("-")) == 4
+      and "X-B3-ParentSpanId" in d, d.get("b3"))
 check("desktop does not get X-Model-ID / X-Product-Version / X-Request-Trace-Id",
       "X-Model-ID" not in d and "X-Product-Version" not in d
       and "X-Request-Trace-Id" not in d)
 c = wb_identity.build_identity_headers("cli", "intl", "u1", "tok", model="ignored")
-check("CLI UA stays CLI/2.168.2 CodeBuddy/2.168.2",
-      c.get("User-Agent") == "CLI/2.168.2 CodeBuddy/2.168.2", c.get("User-Agent"))
+check("CLI UA stays CLI/2.174.0 CodeBuddy/2.174.0",
+      c.get("User-Agent") == "CLI/2.174.0 CodeBuddy/2.174.0", c.get("User-Agent"))
 check("CLI keeps Request-ID = Message-ID",
       c.get("X-Request-ID") == c.get("X-Conversation-Message-ID"))
 check("CLI does not get X-Model-ID / X-Request-Trace-Id",

@@ -27,11 +27,11 @@
        hub 没有宿主，默认 1.119.0，可用 WB_VSCODE_IDE_VERSION 覆盖。
 
   3. 官方 CodeBuddy CLI (cli):
-     - X-IDE-Type / X-IDE-Name: CLI、X-IDE-Version: 2.168.2
+     - X-IDE-Type / X-IDE-Name: CLI、X-IDE-Version: 2.174.0
      - X-Product: SaaS
      - X-Agent-Intent: craft、X-Agent-Purpose: conversation、X-Agent-Type: main、
        X-Agent-Runtime: other
-     - UA: CLI/2.168.2 CodeBuddy/2.168.2（官方 buildUserAgent：platform 段 +
+     - UA: CLI/2.174.0 CodeBuddy/2.174.0（官方 buildUserAgent：platform 段 +
        productName 段；adapter 先删掉 SDK 的 user-agent，CLI 也没有
        userAgentExtension，所以没有第三段）
      - OpenAI Node SDK 6.25.0 的 x-stainless-* 指纹头（见
@@ -45,7 +45,8 @@
      - 国际版端点: www.workbuddy.ai（官方 product.json 是 www.codebuddy.ai；本网关
        因解析不了 codebuddy.ai 走 workbuddy.ai，属已知 endpoint 差异），国内版
        端点: copilot.tencent.com
-     取值来源：官方 npm 包 @tencent-ai/codebuddy-code 2.168.2 解包核对
+     取值来源：官方 npm 包 @tencent-ai/codebuddy-code；2.174.0 为 2026-10-24
+     独立 CLI 实测值（capture/cli.jsonl），2.168.2 为更早的解包核对值
      （product.json 的产品常量、dist 里的 header 常量 / buildUserAgent /
      请求头组装 / 请求体处理器）。
 
@@ -82,8 +83,9 @@ DESKTOP_UA_CN = "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"
 
 #: 官方 CodeBuddy CLI 的版本号：npm 包 @tencent-ai/codebuddy-code 的 package
 #: version。product.json 没有覆盖 platformVersion / productVersion，所以
-#: buildUserAgent 的两段（CLI / CodeBuddy）都用它。2.168.2 为官方包解包核对值。
-DEFAULT_IDE_VERSION = "2.168.2"
+#: buildUserAgent 的两段（CLI / CodeBuddy）都用它。2.174.0 为 2026-10-24 独立
+#: CLI wire 实测值（npm latest，capture/cli.jsonl）。
+DEFAULT_IDE_VERSION = "2.174.0"
 #: 官方 CLI 的 UA 公式（dist 里的 buildUserAgent）：
 #:   <platform>/<platformVersion> + <applicationName|productName>/<productVersion>
 #:   + 可选 userAgentExtension
@@ -116,7 +118,12 @@ def _identity_arch():
 
 
 def cli_stainless_headers():
-    """官方 OpenAI Node SDK 6.25.0 的 x-stainless-* 指纹头。"""
+    """官方 OpenAI Node SDK 6.25.0 的 x-stainless-* 指纹头（7 个）。
+
+    x-stainless-timeout 只在调用方给请求设了超时才会出现，官方从未设：
+    桌面端内置 CLI（cap:723/727）与独立 CLI 2.174.0（capture/cli.jsonl，
+    2026-10-24 实测）都不带它。
+    """
     return {
         "x-stainless-lang": "js",
         "x-stainless-package-version": sdk_version(),
@@ -128,7 +135,6 @@ def cli_stainless_headers():
             or str(os.environ.get("WB_IDENTITY_NODE_VERSION") or "").strip()
             or node_version()),
         "x-stainless-retry-count": "0",
-        "x-stainless-timeout": "1200",
     }
 #: X-Agent-Runtime：官方枚举 AGENT_RUNTIMES = local-agent / cloud-agent /
 #: agent-agent；解析函数对未知/缺省值回 "other"（默认 other，可由 env 或
@@ -226,6 +232,43 @@ def desktop_ua(realm):
     cli = _version("desktop_cli")
     product = "WorkBuddy" if realm == "cn" else "workbuddy-ai"
     return "WorkBuddy/%s %s/%s CLI/%s" % (app, product, app, cli)
+
+
+def desktop_cli_version():
+    """桌面端 UA 第三段的内置 CLI 版本（conversations CRUD 的 UA 也要用）。"""
+    return _version("desktop_cli")
+
+
+def desktop_console_ua(realm):
+    """/console/as/*（conversations CRUD / sync）的桌面主组件 UA。
+
+    2026-10-24 实测（capture/lifecycle.jsonl:686/692/724/736）：平台名重复
+    两段——`workbuddy-ai/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0`（与 chat 的
+    `WorkBuddy/… workbuddy-ai/…` 不同，首段没有 WorkBuddy App 名）。
+    """
+    app = desktop_version(realm)
+    product = "WorkBuddy" if realm == "cn" else "workbuddy-ai"
+    return "%s/%s %s/%s CLI/%s" % (product, app, product, app, desktop_cli_version())
+
+
+#: 云控开关：官方客户端的 productFeatures.RequestBodyGzip（product.json 静态
+#: 默认 true，可被服务端配置覆盖；解包 waitConfiguration → productManager）。
+#: gzip chat body 与否跟它走。抓不到 /v3/config 时维持实测状态（开）。
+_PRODUCT_FEATURES = {"RequestBodyGzip": True}
+
+
+def set_product_features(features):
+    """记录 /v3/config 下发的 productFeatures（云控）；只更新已知键。"""
+    if isinstance(features, dict):
+        for key in _PRODUCT_FEATURES:
+            if key in features:
+                _PRODUCT_FEATURES[key] = bool(features[key])
+    return dict(_PRODUCT_FEATURES)
+
+
+def product_feature(key):
+    """某个云控开关的当前值（未知键回 False；RequestBodyGzip 默认 True）。"""
+    return bool(_PRODUCT_FEATURES.get(key))
 
 
 def vscode_product_version():
@@ -357,6 +400,28 @@ def conversation_id_for(uid, session_key):
     return "%s-%s-%s-%s-%s" % (h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
 
 
+def acp_connection_id_for(uid, session_key):
+    """`acp-connection-id`：ACP 连接 id（UUIDv7 形态，带连字符）。
+
+    官方语义（app.asar.unpacked/cli/dist/codebuddy-headless.js）：渲染层与
+    内置 CLI 的每条 ACP 连接一个 connectionId，连接存续期复用，并随 chat
+    请求带到上游——2026-10-24 实测同一轮的 main 与 auxiliary 请求同值
+    （capture/lifecycle.jsonl:723/727，均为 01a16d07-0c74-7fb3-b038-…）。
+    hub 按「账号 + 会话键」稳定派生（派生位与 conversation_id_for 不同源）：
+    同一会话复用同一个连接 id、跨账号 / 跨会话互不相同；客户端没带会话键
+    时按官方形态现生成 UUIDv7。
+    """
+    key = str(session_key or "").strip()
+    if not key:
+        return str(uuid7())
+    digest = hashlib.sha256(("acp|%s|%s" % (uid or "", key)).encode("utf-8")).hexdigest()
+    h = list(digest[:32])
+    h[12] = "7"          # UUIDv7 版本位（实测形态）
+    h[16] = "8"          # RFC 4122 变体位
+    h = "".join(h)
+    return "%s-%s-%s-%s-%s" % (h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+
+
 def new_message_id():
     """X-Request-ID / X-Conversation-Message-ID / -Request-ID / -Root-Request-ID：
     32 位无连字符 hex（5.8.4 实测形态）。"""
@@ -396,10 +461,10 @@ def gzip_body(data):
 def trace_headers(with_parent=False):
     """对话请求带的链路头族（traceparent / b3 / X-B3-* / X-Trace-ID）。
 
-    桌面端 5.8.4 抓包里 main 请求还带 X-B3-ParentSpanId（模型调用是会话根
-    span 的子 span），辅助请求不带；网关没有真实父子关系，桌面端维持原样
-    （with_parent=False）。官方 CLI 的对话请求是子 span，按官方结构补齐父
-    span 与 b3 第四段：with_parent=True。
+    2026-10-24 桌面主对话实测（capture/lifecycle.jsonl:727）：main 请求带
+    X-B3-ParentSpanId、b3 四段（模型调用是会话根 span 的子 span）；auxiliary
+    请求（cap:723，标题生成）才是三段无父。CLI 的对话请求同为子 span 结构。
+    网关没有真实父子关系，main 形态按官方结构合成父 span（with_parent=True）。
     """
     trace = new_message_id()
     span = secrets.token_hex(8)
@@ -518,7 +583,16 @@ def build_identity_headers(product, realm, uid, token,
             "X-Conversation-Message-ID": msg_id,
             "X-Request-ID": msg_id,
         }
-        headers.update(trace_headers())
+        # 2026-10-24 桌面主对话实测（capture/lifecycle.jsonl:727，OpenAI SDK
+        # 形态）：请求带全套 x-stainless-* 指纹（官方不设超时，无 timeout 头）
+        # 与 acp-connection-id（ACP 连接 id，连接存续期复用，见
+        # acp_connection_id_for）。
+        headers.update(cli_stainless_headers())
+        headers["acp-connection-id"] = acp_connection_id_for(uid, session_key)
+        # 实测 main 请求的 b3 是四段（带 X-B3-ParentSpanId）：模型调用是会话
+        # 根 span 的子 span；auxiliary 请求（标题生成，cap:723）才不带父段。
+        # 网关只发 main 对话，因此桌面端也按 CLI 的结构补父 span。
+        headers.update(trace_headers(with_parent=True))
     elif product == PRODUCT_VSCODE:
         # 官方 VSCode 扩展 4.12.39997873 的 chat 请求头（解包源码实锤）：
         #   - 全局拦截器：UA / X-IDE-* / X-Product-Version（UserAgent +
@@ -587,6 +661,9 @@ def build_identity_headers(product, realm, uid, token,
             "X-IDE-Name": "CLI",
             "X-IDE-Version": ide_version,
             "X-Product": "SaaS",
+            # X-Domain：鉴权后的真实 wire 带（capture/cli.jsonl:73/75，值 =
+            # endpoint 域）。早先假 token 的 401 抓包（custom-token 模式）里
+            # 没有它，是未鉴权伪影，不要照抄。
             "X-Domain": endpoint_for(realm, product)[1],
             "User-Agent": "CLI/%s CodeBuddy/%s" % (ide_version, ide_version),
             "X-User-Id": str(uid or "anonymous"),
@@ -597,6 +674,16 @@ def build_identity_headers(product, realm, uid, token,
             "X-Conversation-Message-ID": msg_id,
             "X-Request-ID": msg_id,
         }
+        # 2026-10-24 独立 CLI 2.174.0 实测（capture/cli.jsonl:73 鉴权成功
+        # 请求；:7 假 token 401 请求同形态）：x-requested-with /
+        # x-codebuddy-request 全小写；baggage 带 session_id（=X-Conversation-ID）
+        # 与 conversation_request_id（=X-Conversation-Request-ID，auxiliary
+        # 请求该值为空串）。
+        headers["x-requested-with"] = "XMLHttpRequest"
+        headers["x-codebuddy-request"] = "1"
+        headers["baggage"] = ("codebuddy.session_id=%s,"
+                              "codebuddy.conversation_request_id=%s"
+                              % (conv, conv_req_id))
         # X-Private-Data：官方 getCustomHeaders 先按模型优化开关写 true/false
         # （个人号默认 false、企业号 true），随后策略只在自定义模型/skip 时删头、
         # sticky 会话强制 true。这里按账号是否企业号取对应的默认值。

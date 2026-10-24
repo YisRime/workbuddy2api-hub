@@ -1857,6 +1857,16 @@ IDENTITY_KEY = "identity"
 IDENTITY_PRIVATE_DATA_VALUES = ("auto", "true", "false")
 
 
+def cloud_conversations_enabled(accounts_dir):
+    """桌面身份的云端会话生命周期（/console/as 落库 + 伴随 PATCH）开关。
+
+    默认开启（2026-10-24 实测对齐，cap:686-736）；settings.json 置
+    `"cloud_conversations": false` 可整体关闭——chat 仍可用，只是会话 id
+    回落本地派生、上游侧没有对应会话记录。
+    """
+    return load(accounts_dir).get("cloud_conversations") is not False
+
+
 def identity_private_data(accounts_dir):
     """The configured X-Private-Data override: auto, true or false."""
     raw = load(accounts_dir).get(IDENTITY_KEY)

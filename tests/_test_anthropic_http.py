@@ -6,6 +6,7 @@ request translation, the SSE event sequence and the usage rows - with no
 network access and no real accounts.
 """
 import base64
+import gzip
 import json
 import os
 import sys
@@ -83,6 +84,12 @@ class MockUpstream(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
+        if (self.headers.get("Content-Encoding") or "").lower() == "gzip":
+            # 三身份的 chat body 都是 gzip（2026-10-24 实测桌面端也对齐）。
+            try:
+                raw = gzip.decompress(raw)
+            except OSError:
+                pass
         try:
             body = json.loads(raw.decode("utf-8"))
         except Exception:

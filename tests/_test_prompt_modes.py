@@ -4,6 +4,7 @@ Run with: python _test_prompt_modes.py
 No upstream credentials or outbound network are used.
 """
 import datetime
+import gzip
 import io
 import json
 import os
@@ -19,6 +20,9 @@ os.environ["WB_PROXY_USAGE_DIR"] = _startup_dir.name
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_accounts
+# 本套件聚焦重试/轮换逻辑：关掉桌面云端会话生命周期（默认开，
+# wb_settings.cloud_conversations_enabled），免得 create 多吃 mock 队列。
+wb_accounts.Account.cloud_conversation = lambda self, session_key, first_text="": ""
 import wb_prompt
 import wb_proxy
 import wb_settings
@@ -253,7 +257,10 @@ class DegradedRetryTests(unittest.TestCase):
                     pass
 
             def fake_urlopen(req, timeout=30, proxy=""):
-                bodies.append(json.loads(req.data.decode("utf-8")))
+                data = req.data
+                if data[:2] == b"\x1f\x8b":   # 三身份 chat body 都是 gzip
+                    data = gzip.decompress(data)
+                bodies.append(json.loads(data.decode("utf-8")))
                 if len(bodies) == 1:
                     raise urllib.error.HTTPError(
                         "https://upstream.invalid", 403, "forbidden", {},

@@ -30,7 +30,7 @@ class DefaultVersionTests(unittest.TestCase):
                          "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0")
         self.assertEqual(wb_identity.vscode_ua(),
                          "VSCode/1.119.0 CodeBuddy/4.12.39997873")
-        self.assertEqual(wb_identity.cli_version(), "2.168.2")
+        self.assertEqual(wb_identity.cli_version(), "2.174.0")
         self.assertEqual(wb_identity.sdk_version(), "6.25.0")
         self.assertEqual(wb_identity.node_version(), "v22.21.1")
 

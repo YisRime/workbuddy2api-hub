@@ -13,6 +13,7 @@ credential); 401/403/429 already have their own paths.
 No network: accounts are built from dicts, the upstream call is stubbed, and
 time.sleep is recorded instead of slept.
 """
+import gzip
 import io
 import json
 import os
@@ -26,6 +27,9 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_accounts as A
+# 本套件聚焦重试/轮换逻辑：关掉桌面云端会话生命周期（默认开，
+# wb_settings.cloud_conversations_enabled），免得 create 多吃 mock 队列。
+A.Account.cloud_conversation = lambda self, session_key, first_text="": ""
 import wb_egress
 import wb_proxy
 import wb_settings
@@ -379,7 +383,10 @@ class SwitchOnTests(_OpenUpstreamHarness):
         sent_models = []
 
         def urlopen(req, timeout=30, proxy=""):
-            sent_models.append(json.loads(req.data.decode())["model"])
+            data = req.data
+            if data[:2] == b"\x1f\x8b":   # 三身份 chat body 都是 gzip
+                data = gzip.decompress(data)
+            sent_models.append(json.loads(data.decode())["model"])
             if len(sent_models) == 1:
                 raise error
             return _Response(_Sock())
@@ -427,7 +434,10 @@ class SwitchOnTests(_OpenUpstreamHarness):
         switch_attempts = []
 
         def urlopen(req, timeout=30, proxy=""):
-            model = json.loads(req.data.decode())["model"]
+            data = req.data
+            if data[:2] == b"\x1f\x8b":   # 三身份 chat body 都是 gzip
+                data = gzip.decompress(data)
+            model = json.loads(data.decode())["model"]
             uid = dict((k.lower(), v) for k, v in req.header_items()).get("x-user-id")
             sent.append((model, uid))
             if uid == first.uid:
