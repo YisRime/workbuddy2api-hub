@@ -29,7 +29,7 @@ class DefaultVersionTests(unittest.TestCase):
         self.assertEqual(wb_identity.desktop_ua("cn"),
                          "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0")
         self.assertEqual(wb_identity.vscode_ua(),
-                         "VSCode/1.119.0 CodeBuddy/4.12.39997873")
+                         "VSCode/1.118.0 coding-copilot/4.12.39997873")
         self.assertEqual(wb_identity.cli_version(), "2.174.0")
         self.assertEqual(wb_identity.sdk_version(), "6.25.0")
         self.assertEqual(wb_identity.node_version(), "v22.21.1")
@@ -49,7 +49,7 @@ class DefaultVersionTests(unittest.TestCase):
                                         "sdk": "1.0.0",
                                         "node": "v1.0.0"})
         self.assertEqual(wb_identity.vscode_ua(),
-                         "VSCode/2.3.4 CodeBuddy/1.2.3")
+                         "VSCode/2.3.4 coding-copilot/1.2.3")
         self.assertEqual(wb_identity.cli_version(), "9.8.7")
         headers = wb_identity.cli_stainless_headers()
         self.assertEqual(headers["x-stainless-package-version"], "1.0.0")

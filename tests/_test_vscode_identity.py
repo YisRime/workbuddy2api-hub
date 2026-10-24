@@ -75,20 +75,20 @@ def dashed_uuid(value):
     return len(value) == 36 and value.count("-") == 4
 
 
-INTL_UA = "VSCode/1.119.0 CodeBuddy/4.12.39997873"
+INTL_UA = "VSCode/1.118.0 coding-copilot/4.12.39997873"
 
 print("[1] product constants follow the official extension")
 check("productVersion is 4.12.39997873",
       wb_identity.VSCODE_PRODUCT_VERSION == "4.12.39997873")
-check("host VSCode version stays 1.119.0 (constant)",
-      wb_identity.VSCODE_IDE_VERSION == "1.119.0")
+check("host VSCode version stays 1.118.0 (constant, measured host)",
+      wb_identity.VSCODE_IDE_VERSION == "1.118.0")
 check("UA is VSCode/<host> CodeBuddy/<extension>",
       wb_identity.vscode_ua() == INTL_UA, wb_identity.vscode_ua())
 _saved_ide = os.environ.get("WB_VSCODE_IDE_VERSION")
 os.environ["WB_VSCODE_IDE_VERSION"] = "1.120.0"
 try:
     check("WB_VSCODE_IDE_VERSION overrides the host version",
-          wb_identity.vscode_ua() == "VSCode/1.120.0 CodeBuddy/4.12.39997873",
+          wb_identity.vscode_ua() == "VSCode/1.120.0 coding-copilot/4.12.39997873",
           wb_identity.vscode_ua())
 finally:
     if _saved_ide is None:
@@ -109,13 +109,13 @@ check("User-Agent", h.get("User-Agent") == INTL_UA, h.get("User-Agent"))
 check("X-IDE-Type / X-IDE-Name are VSCode",
       (h.get("X-IDE-Type"), h.get("X-IDE-Name")) == ("VSCode", "VSCode"),
       (h.get("X-IDE-Type"), h.get("X-IDE-Name")))
-check("X-IDE-Version is the host VSCode version",
-      h.get("X-IDE-Version") == "1.119.0", h.get("X-IDE-Version"))
-check("X-Product-Version is the extension version",
-      h.get("X-Product-Version") == "4.12.39997873", h.get("X-Product-Version"))
-check("X-Env-ID is production", h.get("X-Env-ID") == "production", h.get("X-Env-ID"))
-check("X-Product is kept (main-chat evidence pending a 5.8.x capture)",
-      h.get("X-Product") == "SaaS", h.get("X-Product"))
+check("X-IDE-Version is the host VSCode version (measured 1.118.1 host)",
+      h.get("X-IDE-Version") == "1.118.0", h.get("X-IDE-Version"))
+# 4.12 解包实锤：主 chat 的 buildModelRequestHeaders 不含 X-Product /
+# X-Product-Version / X-Env-ID（它们只出现在非 chat 拦截器路径）。
+check("no X-Product / X-Product-Version / X-Env-ID on the main chat",
+      not any(k in h for k in ("X-Product", "X-Product-Version", "X-Env-ID")), 
+      sorted(set(("X-Product", "X-Product-Version", "X-Env-ID")) & set(h)))
 check("X-Model-ID carries this request's model",
       h.get("X-Model-ID") == "deepseek-v4.1-flash", h.get("X-Model-ID"))
 check("X-Agent-Intent is craft, X-Agent-Type is main",
@@ -176,13 +176,9 @@ check("X-B3-SpanId and X-B3-ParentSpanId are 16 hex",
 check("no traceparent on the VSCode identity",
       "traceparent" not in trace)
 check("X-B3-Sampled is 1", trace.get("X-B3-Sampled") == "1")
-check("X-Request-Trace-Id is a per-request dashed uuid",
-      dashed_uuid(trace.get("X-Request-Trace-Id")), trace.get("X-Request-Trace-Id"))
-check("two calls get different X-Request-Trace-Id",
-      wb_identity.build_identity_headers("vscode", "intl", "u1", "tok")
-      ["X-Request-Trace-Id"]
-      != wb_identity.build_identity_headers("vscode", "intl", "u1", "tok")
-      ["X-Request-Trace-Id"])
+# X-Request-Trace-Id 只属于非 chat 拦截器（4.12 解包），主 chat 不发。
+check("no X-Request-Trace-Id on the main chat",
+      "X-Request-Trace-Id" not in trace)
 
 print()
 print("[5] X-Private-Data follows the official domestic-site rule")
@@ -190,9 +186,8 @@ cn = wb_identity.build_identity_headers("vscode", "cn", "u1", "tok")
 check("the CN site does not send X-Private-Data",
       "X-Private-Data" not in cn)
 check("the CN site keeps the CN domain", cn.get("X-Domain") == "www.workbuddy.cn")
-check("the CN site uses the same UA/versions",
-      cn.get("User-Agent") == INTL_UA
-      and cn.get("X-Product-Version") == "4.12.39997873")
+check("the CN site uses the same UA",
+      cn.get("User-Agent") == INTL_UA, cn.get("User-Agent"))
 
 print()
 print("[6] Account.headers wires model / conversation id / device token through")
@@ -308,9 +303,9 @@ if len(upstream.calls) >= 2:
     second = header_map(upstream.calls[1])
     check("UA goes out as the official one", first.get("user-agent") == INTL_UA,
           first.get("user-agent"))
-    check("X-IDE-Version / X-Product-Version go out",
-          first.get("x-ide-version") == "1.119.0"
-          and first.get("x-product-version") == "4.12.39997873")
+    check("X-IDE-Version goes out; no X-Product-Version on the main chat",
+          first.get("x-ide-version") == "1.118.0"
+          and "x-product-version" not in first)
     check("X-Model-ID goes out with the payload's model",
           first.get("x-model-id") == PAYLOAD["model"], first.get("x-model-id"))
     check("X-Agent-Intent / X-Agent-Type / X-Private-Data go out",
@@ -328,8 +323,6 @@ if len(upstream.calls) >= 2:
     check("the conversation id is stable across the retry",
           first.get("x-conversation-id") == second.get("x-conversation-id"),
           (first.get("x-conversation-id"), second.get("x-conversation-id")))
-    check("X-Request-Trace-Id is fresh per attempt",
-          first.get("x-request-trace-id") != second.get("x-request-trace-id"))
     check("the b3 header is four segments on the wire",
           len(str(first.get("b3", "")).split("-")) == 4, first.get("b3"))
     check("the trace family is on the wire",

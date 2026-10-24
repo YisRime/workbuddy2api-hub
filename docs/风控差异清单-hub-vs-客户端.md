@@ -343,6 +343,10 @@ local 模式/UAC);local 模式抓不到走回环代理(Clash 7890)的流量,这�
    hub 生成不了、不伪造(见 §2 处置)。
 3. **header 顺序**:官方头的排列顺序(SDK 的插入序)hub 未复刻;HTTP/1.1
    wire 上可见,但属低信号,暂不动。
-4. **VSCode 分支**:三身份里唯一没有 wire 实测的;方法同 CLI(扩展装进
-   便携 VSCode + 代理抓包),价值中等。
+4. ~~**VSCode 分支**~~ **已对齐(2026-10-24 第六轮,Open VSX vsix
+   解包 + 启动期 wire)**:UA 第二段实为 `coding-copilot`(旧解包笔记的
+   `CodeBuddy` 有误);主 chat 的 Accept 是 `text/event-stream`;头集合 =
+   buildModelRequestHeaders 显式头 + buildAuthHeaders 鉴权头,不含
+   X-Product / X-Product-Version / X-Env-ID / X-Request-Trace-Id(旧解包
+   把非 chat 拦截器的头混进了 chat 形态)。详见 wb_identity VSCode 分支注。
 5. **国内版**:整版无实测样本,需在国内版客户端上复刻本轮流程抓一轮。

@@ -24,7 +24,7 @@
        UserAgentHttpInterceptor.buildUserAgent 拼成
        `<platform>/<platformVersion> <productName>/<productVersion>`，
        platformVersion 是宿主的 VSCode 版本（扩展从 vscode.env 取），
-       hub 没有宿主，默认 1.119.0，可用 WB_VSCODE_IDE_VERSION 覆盖。
+       hub 没有宿主，默认 1.118.0（实测宿主版本），可用 WB_VSCODE_IDE_VERSION 覆盖。
 
   3. 官方 CodeBuddy CLI (cli):
      - X-IDE-Type / X-IDE-Name: CLI、X-IDE-Version: 2.174.0
@@ -157,15 +157,15 @@ CLI_BODY_DROP_FIELDS = ("metadata", "conversation_id", "previous_response_id")
 # UA 由 UserAgentHttpInterceptor.buildUserAgent 拼成
 # `<platform>/<platformVersion> <productName>/<productVersion>`；其中
 # platformVersion 是宿主的 VSCode 版本（扩展从 vscode.env 取），hub 没有宿主，
-# 默认 1.119.0，可用 WB_VSCODE_IDE_VERSION 覆盖。
+# 默认 1.118.0（Open VSX 4.12.39997873 抓包实测的宿主版本），可用 WB_VSCODE_IDE_VERSION 覆盖。
 VSCODE_PRODUCT_VERSION = "4.12.39997873"
-VSCODE_IDE_VERSION = "1.119.0"
+VSCODE_IDE_VERSION = "1.118.0"
 VSCODE_PLATFORM = "VSCode"
-VSCODE_PRODUCT_NAME = "CodeBuddy"
+VSCODE_PRODUCT_NAME = "coding-copilot"
 
 
 def vscode_ide_version():
-    """宿主 VSCode 版本（官方取 vscode.env；hub 没有宿主，默认 1.119.0）。
+    """宿主 VSCode 版本（官方取 vscode.env；hub 没有宿主，默认 1.118.0）。
 
     可用 WB_VSCODE_IDE_VERSION 覆盖，跟你的实际宿主 IDE 版本对齐。
     """
@@ -594,36 +594,40 @@ def build_identity_headers(product, realm, uid, token,
         # 网关只发 main 对话，因此桌面端也按 CLI 的结构补父 span。
         headers.update(trace_headers(with_parent=True))
     elif product == PRODUCT_VSCODE:
-        # 官方 VSCode 扩展 4.12.39997873 的 chat 请求头（解包源码实锤）：
-        #   - 全局拦截器：UA / X-IDE-* / X-Product-Version（UserAgent +
-        #     CustomHeadersHttpProxyInterceptor）、X-Env-ID（HttpEnvRoute）、
-        #     X-Request-Trace-Id（CustomHeadersHttpProxyInterceptor，每请求一个
-        #     带连字符的 generateUUUID()）；
-        #   - model-provider（buildModelRequestHeaders）：X-Agent-Intent、
-        #     X-Conversation-* 家族、X-Model-ID；agentType 在主对话是 main；
-        #   - CraftInvokableAgent 拦截器：X-Private-Data（仅非国内站）；
-        #   - trace span：X-Trace-ID / b3 / X-B3-*（见 vscode_trace_headers）。
-        # id 关系按官方：X-Request-ID 与 X-Conversation-Request-ID 是同一个本轮
-        # requestId（BaseAgent 的 requestId = uuidv4 去连字符，32hex）；
-        # X-Conversation-ID 是 32hex；X-Conversation-Message-ID 是独立的随机值。
-        # 主对话（primary agent）不发 X-Root-Request-ID / X-Parent-Conversation-ID
-        # ——官方只在 subagent 上带 rootRequestId。
+        # 官方 VSCode 扩展 4.12.39997873 的 chat 请求头（Open VSX vsix 解包
+        # 实锤——buildModelRequestHeaders / buildAuthHeaders / defaultHeaders /
+        # 保留名单 Jn/qn，2026-10-24 第二轮；启动期 wire 见
+        # capture/vscode.jsonl:14）：
+        #   - chat 请求的骨架是 defaultHeaders = {Content-Type: application/json,
+        #     Accept: text/event-stream}（不是 axios 的四段 Accept！）；
+        #   - buildModelRequestHeaders 显式加 X-Agent-Intent / X-Conversation-ID /
+        #     X-Conversation-Request-ID / X-Conversation-Message-ID /
+        #     X-Request-ID（= requestId，与 Conversation-Request-ID 同值）/
+        #     X-Agent-Type（非直连）+ 可选 X-Model-ID / monitor_*；
+        #   - buildAuthHeaders 加 X-User-Id / Authorization Bearer /
+        #     X-Enterprise-Id+X-Tenant-Id（企业号）/ X-Domain（auth.domain）/
+        #     X-Department-Info（ar=true 时）；
+        #   - UA 由全局 axios 拦截器注入：VSCode/<宿主版本> coding-copilot/<扩展
+        #     版本>（启动期 wire cap:vscode.jsonl:14 实锤——第二段是
+        #     coding-copilot，不是旧解包笔记里的 CodeBuddy）；
+        #   - 保留名单：非直连时 contextHeaders 里 agent-type / root-request-id /
+        #     parent-conversation-id 会被剥掉重建（Jn/zn），X-Product 不在
+        #     buildModelRequestHeaders 的显式集合里——主 chat **不发** X-Product
+        #     与 X-Domain 以外的 Product-Version 等推断头；X-Env-ID 只在
+        #     HttpEnvRoute 路径（非 chat）出现。
+        #   - id 形态：requestId = uuidv4 去连字符（32hex），同一 requestId 用于
+        #     X-Request-ID 与 X-Conversation-Request-ID；X-Conversation-Message-ID
+        #     是独立随机值；X-Conversation-ID 32hex。
         headers = {
             "X-Agent-Intent": "craft",
             "X-Agent-Type": "main",
             "X-IDE-Type": VSCODE_PLATFORM,
             "X-IDE-Name": VSCODE_PLATFORM,
             "X-IDE-Version": vscode_ide_version(),
-            "X-Product-Version": vscode_product_version(),
-            "X-Env-ID": VSCODE_ENV_ID,
-            # 官方主 chat 代码路径没有 X-Product（只有 codewiki 路径有）。本 PR
-            # 保留现状，避免误删；「主 chat 是否发 X-Product」待 5.8.x 抓包确认。
-            "X-Product": "SaaS",
             "X-Domain": endpoint_for(realm, product)[1],
             "User-Agent": vscode_ua(),
             "X-User-Id": str(uid or "anonymous"),
             "Authorization": "Bearer " + str(token or ""),
-            "X-Request-Trace-Id": new_request_trace_id(),
             "X-Conversation-ID": conv,
             "X-Conversation-Request-ID": conv_req_id,
             "X-Conversation-Message-ID": msg_id,

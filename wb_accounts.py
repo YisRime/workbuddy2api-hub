@@ -2130,15 +2130,16 @@ class Account(object):
                 "x-codebuddy-request": "1",
             }
         else:
-            # VSCode：只有扩展解包源码证据、无 wire 实测，维持原形态。
+            # VSCode：4.12.39997873 解包实锤（buildModelRequestHeaders +
+            # defaultHeaders）——Accept 就是 text/event-stream（SSE 请求），无
+            # Origin / Referer / Accept-Language / X-CodeBuddy-Request；
+            # X-Requested-With 由 /v3/config wire（cap:vscode.jsonl:14）确认
+            # 保留。X-Product / X-Product-Version / X-Env-ID /
+            # X-Request-Trace-Id 均不在主 chat 的头集合里（wb_identity 注）。
             headers = {
                 "Content-Type": "application/json",
-                "Accept": "application/json, text/plain, */*",
+                "Accept": "text/event-stream",
                 "X-Requested-With": "XMLHttpRequest",
-                "Origin": cfg["origin"],
-                "Referer": cfg["origin"] + "/",
-                "X-CodeBuddy-Request": "1",
-                "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
             }
         headers.update(identity)
         # 官方客户端的 SDK/axios 默认都带 Accept-Encoding（cap:727 实测

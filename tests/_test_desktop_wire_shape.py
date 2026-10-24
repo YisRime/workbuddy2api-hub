@@ -117,11 +117,16 @@ class DesktopChatShapeTests(unittest.TestCase):
             other_account.headers(purpose="chat",
                                   session_key="sess-1")["acp-connection-id"])
 
-    def test_vscode_keeps_its_own_shape_until_measured(self):
+    def test_vscode_follows_the_unpacked_412_shape(self):
         headers = intl_account(product="vscode").headers(purpose="chat")
-        # VSCode 分支无 wire 实测，维持解包形态：不受桌面分支对齐影响。
-        self.assertEqual(headers["Accept"], "application/json, text/plain, */*")
-        self.assertIn("Origin", headers)
+        # 4.12.39997873 解包实锤：Accept 是 text/event-stream（SSE），无
+        # Origin/Referer/X-Product/X-Env-ID/X-Request-Trace-Id。
+        self.assertEqual(headers["Accept"], "text/event-stream")
+        self.assertEqual(headers["User-Agent"],
+                         "VSCode/1.118.0 coding-copilot/4.12.39997873")
+        self.assertNotIn("Origin", headers)
+        self.assertNotIn("X-Product", headers)
+        self.assertNotIn("X-Request-Trace-Id", headers)
         self.assertNotIn("acp-connection-id", headers)
 
 
